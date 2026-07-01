@@ -1,0 +1,13 @@
+{
+  "name": "horse-provider-ics",
+  "description": "OverbyteICS transport provider for the Horse web framework. HTTP/HTTPS server based on ICS THttpServer / TSslHttpServer with OpenSSL 3.x/4.x TLS (TLS 1.3, mTLS). Hybrid-interface architecture — implements IHorseRawRequest / IHorseRawResponse so Horse middleware works unchanged. v1: Delphi + Windows only; FPC seams kept for a future drapid/ICS_Lazarus port.",
+  "version": "1.0.1",
+  "homepage": "https://github.com/freitasjca/horse-provider-ics",
+  "license": "MIT",
+  "mainsrc": "src/",
+  "browsingpath": "src/",
+  "projects": [],
+  "dependencies": {
+    "github.com/freitasjca/horse": ">=3.1.105"
+  }
+}
