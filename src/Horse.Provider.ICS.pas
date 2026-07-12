@@ -145,6 +145,9 @@ type
     class var FSslContext:     TSslContext;
     class var FReceiver:       TICSMarshalReceiver;
     class var FPort:           Integer;
+    // Bind host set by the Listen overload family (upstream 2026-07 sync).
+    // '' or '0.0.0.0' = all interfaces; anything else becomes FServer.Addr.
+    class var FHost:           string;
     class var FConfig:         THorseICSConfig;
     class var FStopEvent:      TEvent;
     class var FRunning:        Boolean;
@@ -209,7 +212,13 @@ type
   public
     class procedure StopListen; override;
     class procedure Listen; overload; override;
-    class procedure Listen(APort: Integer); reintroduce; overload;
+    // Listen overload family — signatures mirror the Console provider.
+    // Required since the 2026-07 upstream sync: Horse.Instance
+    // (THorseInstance.Listen) calls the 4-argument form directly.
+    class procedure Listen(const APort: Integer; const AHost: string = '0.0.0.0'; const ACallbackListen: TProc = nil; const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
+    class procedure Listen(const APort: Integer; const ACallbackListen: TProc; const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
+    class procedure Listen(const AHost: string; const ACallbackListen: TProc = nil; const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
+    class procedure Listen(const ACallbackListen: TProc; const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
     class procedure ListenWithConfig(const APort: Integer;
       const AConfig: THorseICSConfig); reintroduce;
     class procedure Stop;
@@ -351,9 +360,36 @@ begin
   InternalListen(LPort, THorseICSConfig.Default);
 end;
 
-class procedure THorseProviderICS.Listen(APort: Integer);
+// ── Listen overload family ────────────────────────────────────────────────────
+// Master overload: stores host + lifecycle callbacks, then starts with the
+// default config. DoOnListen (fired inside InternalListen) invokes the
+// just-set ACallbackListen; DoOnStopListen fires from StopListen.
+class procedure THorseProviderICS.Listen(const APort: Integer; const AHost: string; const ACallbackListen, ACallbackStopListen: TProc);
 begin
+  FHost := AHost;
+  SetOnListen(ACallbackListen);
+  SetOnStopListen(ACallbackStopListen);
   InternalListen(APort, THorseICSConfig.Default);
+end;
+
+class procedure THorseProviderICS.Listen(const APort: Integer; const ACallbackListen, ACallbackStopListen: TProc);
+begin
+  Listen(APort, FHost, ACallbackListen, ACallbackStopListen);
+end;
+
+class procedure THorseProviderICS.Listen(const AHost: string; const ACallbackListen, ACallbackStopListen: TProc);
+var
+  LPort: Integer;
+begin
+  LPort := FPort;
+  if LPort <= 0 then
+    LPort := DEFAULT_PORT;
+  Listen(LPort, AHost, ACallbackListen, ACallbackStopListen);
+end;
+
+class procedure THorseProviderICS.Listen(const ACallbackListen, ACallbackStopListen: TProc);
+begin
+  Listen(FHost, ACallbackListen, ACallbackStopListen);
 end;
 
 class procedure THorseProviderICS.ListenWithConfig(const APort: Integer;
@@ -436,7 +472,12 @@ begin
   end;
 
   FServer.Port             := IntToStr(APort);
-  FServer.Addr             := '0.0.0.0';
+  // '0.0.0.0' = all interfaces. FHost is set by the Listen overload family;
+  // '' (never set) keeps the historical all-interfaces default.
+  if (FHost = '') or (FHost = '0.0.0.0') then
+    FServer.Addr := '0.0.0.0'
+  else
+    FServer.Addr := FHost;
   FServer.ListenBacklog    := AConfig.ListenBacklog;
   FServer.KeepAliveTimeSec := AConfig.KeepAliveTimeSec;
   if AConfig.ServerBanner <> '' then

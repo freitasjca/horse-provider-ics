@@ -53,8 +53,10 @@ uses
   Horse.Core.Param,
   Horse.Provider.ICS.RawRequest,
   Horse.Provider.ICS.WebRequestAdapter
+  // TMethodType lives in Horse.Commons on BOTH compilers since the 2026-07
+  // upstream sync — do not add Web.HTTPApp here, its TMethodType would
+  // shadow Horse.Commons' enum and break THorseRequest.Populate with E2010.
 {$IF NOT DEFINED(FPC)}
-  , Web.HTTPApp
   , OverbyteIcsFormDataDecoder   // TFormDataAnalyser — multipart/form-data (Delphi: Windows & POSIX)
 {$ENDIF}
   ;
