@@ -8,6 +8,6 @@
   "browsingpath": "src/",
   "projects": [],
   "dependencies": {
-    "github.com/freitasjca/horse": ">=3.2.101"
+    "github.com/HashLoad/horse": ">=3.3.0"
   }
 }

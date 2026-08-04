@@ -1,4 +1,4 @@
-program HorseICSTestServer;
+﻿program HorseICSTestServer;
 
 {$APPTYPE CONSOLE}
 {$DEFINE HORSE_PROVIDER_ICS}
@@ -306,6 +306,29 @@ begin
       Res.ContentType('application/json; charset=utf-8')
          .Send(Format('{"body":"%s","size":%d}',
            [JE(LBody), Length(TEncoding.UTF8.GetBytes(LBody))]));
+    end);
+
+  // Streaming — ICS v1 does not support pull-model chunked streaming.
+  // 501 stubs let a shared test client probe capability without hanging.
+  THorse.Get('/stream/pull',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      Res.Status(501).ContentType('application/json; charset=utf-8')
+         .Send('{"error":"chunked streaming not implemented on ICS transport"}');
+    end);
+
+  THorse.Get('/stream/content-type',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      Res.Status(501).ContentType('application/json; charset=utf-8')
+         .Send('{"error":"chunked streaming not implemented on ICS transport"}');
+    end);
+
+  THorse.Get('/stream/empty',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      Res.Status(501).ContentType('application/json; charset=utf-8')
+         .Send('{"error":"chunked streaming not implemented on ICS transport"}');
     end);
 end;
 

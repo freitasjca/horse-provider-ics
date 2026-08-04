@@ -86,6 +86,7 @@ uses
   System.SyncObjs,
   System.Generics.Collections,
   Horse.Exception,
+  Horse.Proc,
   Horse.Provider.Abstract,
   Horse.Provider.ICS.Config,
   Horse.Provider.ICS.Pool,

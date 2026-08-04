@@ -205,9 +205,9 @@ var
   I:          Integer;
   LName, LVal: string;
   LCookie:    THorseCookie;
-{$IF NOT DEFINED(FPC)}
-  Pair: TPair<string, string>;
-{$ENDIF}
+  {$IFNDEF FPC}
+  LPair:      TPair<string, string>;
+  {$ENDIF}
 begin
   LHeaders :=
     'X-Content-Type-Options: nosniff'#13#10 +
@@ -219,9 +219,13 @@ begin
   else
     LHeaders := LHeaders + 'Server: unknown'#13#10;
 
+  // App-set headers — MERGE-COMPAT (2026-07-18): merged HashLoad/horse types
+  // CustomHeaders as TStringList on FPC but TDictionary<string,string> on Delphi;
+  // Names[I]/ValueFromIndex[I] only exist on FPC. Split per compiler (was E2003
+  // 'Names' building the ICS provider against merged horse).
   if Assigned(AHorseRes.CustomHeaders) then
   begin
-{$IF DEFINED(FPC)}
+    {$IF DEFINED(FPC)}
     for I := 0 to AHorseRes.CustomHeaders.Count - 1 do
     begin
       LName := AHorseRes.CustomHeaders.Names[I];
@@ -229,10 +233,11 @@ begin
       if LName <> '' then
         EmitHeader(LHeaders, LName, LVal);
     end;
-{$ELSE}
-    for Pair in AHorseRes.CustomHeaders do
-      EmitHeader(LHeaders, Pair.Key, Pair.Value);
-{$ENDIF}
+    {$ELSE}
+    for LPair in AHorseRes.CustomHeaders do
+      if LPair.Key <> '' then
+        EmitHeader(LHeaders, LPair.Key, LPair.Value);
+    {$ENDIF}
   end;
 
   // [COMPAT-1] middleware-set headers via RawWebResponse.SetCustomHeader

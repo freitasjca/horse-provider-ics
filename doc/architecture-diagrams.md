@@ -76,7 +76,7 @@ per-request:
 ## Inheritance — hybrid adapter
 
 ```
-TInterfacedWebRequest (generic — patches/horse/src/Horse.Provider.RawAdapters)
+TInterfacedWebRequest (generic — horse/src/Horse.Provider.RawAdapters, upstream ≥3.3.0)
         ↑
 TICSWebRequest        (thin constructor — Horse.Provider.ICS.WebRequestAdapter)
         ↑

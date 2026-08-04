@@ -217,7 +217,7 @@ tests/
 
 ## Dependencies
 
-- [`HashLoad/horse`](https://github.com/HashLoad/horse) (patched fork — `freitasjca/horse` >= 3.1.104 — the RFC 6265 typed-cookie API `Res.Cookie(...)` lives in horse's `Horse.Core.Cookie`)
+- [`HashLoad/horse`](https://github.com/HashLoad/horse) >= 3.3.0 — first official release with `IHorseRawRequest` / `IHorseRawResponse`, `HORSE_PROVIDER_*` define normalization, and `Res.Cookie(...)` (RFC 6265 typed-cookie API in `Horse.Core.Cookie`). The `freitasjca/horse` fork is retired.
 - [OverbyteICS v9.7](https://wiki.overbyte.eu/wiki/index.php/ICS_Download) (`icsv97/Source` added to the project search path; multipart decoding uses ICS's own `OverbyteIcsFormDataDecoder`)
 
 ICS is not Boss-installable — same situation as mORMot. Add `icsv97/Source` to the project's library path manually.
