@@ -222,6 +222,31 @@ tests/
 
 ICS is not Boss-installable — same situation as mORMot. Add `icsv97/Source` to the project's library path manually.
 
+### Runtime files to ship
+
+| File | Windows | Linux / macOS | When |
+|---|---|---|---|
+| OpenSSL | `libssl-3-x64.dll`<br>`libcrypto-3-x64.dll` | `libssl.so.3`<br>`libcrypto.so.3` | TLS / mTLS only |
+
+Nothing else — the ICS engine itself compiles into your binary, so a plain-HTTP
+build ships as a single `.exe`.
+
+**The OpenSSL libraries come with ICS.** They are in the ICS distribution
+(`icsv97/`), already matched to the ICS version you compiled against, so there
+is no version hunt and no mismatch against a system-wide OpenSSL. This is a real
+advantage over the CrossSocket, mORMot and nghttp2 providers, all of which
+expect you to source OpenSSL yourself and keep its version in step. Copy the
+pair next to your `.exe` rather than into `System32`.
+
+For a **Windows Service**, the DLLs must sit in the same folder as the service
+`.exe` — the Service Control Manager does not inherit the interactive user's
+`PATH`, so a copy that works when you double-click will fail when the service
+starts.
+
+ICS 4.x-era builds may name the pair `libssl-1_1-x64.dll` / `libcrypto-1_1-x64.dll`.
+Pick one version family and use it throughout: 1.1.x and 3.x cannot coexist in a
+single process.
+
 ## Out of scope / follow-ups
 
 - **Delphi POSIX (Linux64 / macOS)** — **supported** via ICS's own POSIX layer (see *Platform scope*). The message-loop marshaling, multipart decoding, and OpenSSL TLS all carry over with no provider code change; the Linux daemon shape ships in `Horse.Provider.ICS.Daemon`.
