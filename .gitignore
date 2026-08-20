@@ -94,4 +94,6 @@ __recovery/
 *.identifier
 samples/bench/results/
 *.log
-tests/temp/
+tests/temp/*.dsv
+*.identcache
+*.local
