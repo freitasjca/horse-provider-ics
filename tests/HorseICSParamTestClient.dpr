@@ -72,6 +72,9 @@ type
     StatusCode: Integer;
     Body:       string;
     Cookies:    string;   // all Set-Cookie header values, LF-joined (Section K)
+    Headers:    string;   // all response headers "Name: Value" LF-joined.
+                          // Populated by DoSyncBytes only (Section M needs to
+                          // read X-Body-Bytes); DoSync leaves it empty.
     TimedOut:   Boolean;
   end;
 
@@ -220,11 +223,15 @@ begin
     LHeaders['Content-Type'] := AContentType;
     AClient.DoRequest(AMethod, AUrl, LHeaders, ABody, nil, nil,
       procedure(const AResp: ICrossHttpClientResponse)
+      var
+        NV: TNameValue;
       begin
         if AResp <> nil then
         begin
           LLocal.StatusCode := AResp.StatusCode;
           LLocal.Body       := StreamToStr(AResp.Content);
+          for NV in AResp.Header do
+            LLocal.Headers := LLocal.Headers + NV.Name + ': ' + NV.Value + #10;
         end;
         LEvent.SetEvent;
       end);
@@ -874,6 +881,45 @@ begin
       Format('status=%d', [R.StatusCode]))
   else
     Check('L3  pool healthy after binary body', False, 'timeout');
+
+  // ════════════════════════════════════════════════════════════════════════════
+  Section('M  Binary RESPONSE body must not abort the response (FIX-BINBODY-1)');
+  // ════════════════════════════════════════════════════════════════════════════
+  //
+  // The other half of FIX-BINBODY-1. TICSResponseBridge.TryReadBodyStream
+  // decoded the response ContentStream with TEncoding.UTF8.GetString, so
+  // Res.SendFile with a binary stream (a PDF, an image, a TFDMemTable export)
+  // raised EEncodingError and turned a valid binary response into a 500.
+  //
+  // As in Section L the body cannot carry the assertion — ICS stores the
+  // response body as a string, so binary content arrives empty either way.
+  // X-Body-Bytes is the observable: the handler sets it to the stream size
+  // before calling SendFile, so 256 proves the bridge ran TryReadBodyStream
+  // over 256 real bytes rather than over an empty stream. Without it, M1
+  // would pass on unfixed code if the route had produced nothing.
+  //
+  // Sections H1/H2 are the positive control for SendFile itself — they already
+  // prove text streams are delivered byte-for-byte through this same path.
+  if DoSyncBytes(AClient, 'GET', BASE_URL + '/body/binary-response', nil,
+       'application/octet-stream', R) then
+  begin
+    Check('M1  GET /body/binary-response -> 200, not 500 (SendFile binary)',
+      R.StatusCode = 200,
+      Format('status=%d body=<%s>', [R.StatusCode, R.Body]));
+
+    Check('M2  handler produced a 256-byte stream (X-Body-Bytes: 256)',
+      Pos('X-Body-Bytes: 256', R.Headers) > 0,
+      Format('headers=<%s>',
+        [StringReplace(R.Headers, #10, ' | ', [rfReplaceAll])]));
+  end
+  else
+    Check('M1  GET /body/binary-response', False, 'timeout');
+
+  if DoSync(AClient, 'GET', BASE_URL + '/mem/pool', '', R) then
+    Check('M3  pool healthy after binary response', R.StatusCode = 200,
+      Format('status=%d', [R.StatusCode]))
+  else
+    Check('M3  pool healthy after binary response', False, 'timeout');
 
 end;
 

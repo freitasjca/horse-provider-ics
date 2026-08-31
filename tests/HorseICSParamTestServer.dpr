@@ -309,6 +309,43 @@ begin
     end
   );
 
+  // ── Binary RESPONSE body (Section M — verifies FIX-BINBODY-1, response side) ─
+  // Mirror of /body/binary for the other direction. TICSResponseBridge's
+  // TryReadBodyStream decoded the response ContentStream with
+  // TEncoding.UTF8.GetString, so Res.SendFile with any binary stream — a PDF,
+  // an image, a TFDMemTable export — raised EEncodingError and turned a valid
+  // binary response into a 500.
+  //
+  // The response body cannot be the assertion here: ICS carries it as a string,
+  // so binary content arrives empty whether or not the guard fires. X-Body-Bytes
+  // is the observable instead — it proves this handler built a 256-byte stream
+  // and handed it to SendFile, so the bridge really did run TryReadBodyStream
+  // over binary content rather than over nothing.
+  //
+  // Freeing LStream in a finally is deliberate and mirrors Section J:
+  // PATCH-SENDFILE-1 makes SendFile copy the source at call time.
+  THorse.Get('/body/binary-response',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    var
+      LStream: TMemoryStream;
+      LBytes:  TBytes;
+      I:       Integer;
+    begin
+      SetLength(LBytes, 256);
+      for I := 0 to 255 do
+        LBytes[I] := Byte(I);
+      LStream := TMemoryStream.Create;
+      try
+        LStream.WriteBuffer(LBytes[0], Length(LBytes));
+        LStream.Position := 0;
+        Res.AddHeader('X-Body-Bytes', IntToStr(LStream.Size));
+        Res.SendFile(LStream, 'binary.bin', 'application/octet-stream');
+      finally
+        LStream.Free;
+      end;
+    end
+  );
+
   // ── Wildcard catch-all + SendFile (Section J — verifies PATCH-SENDFILE-1) ─────
   // Serves a file via SendFile and frees the stream in a finally — the exact
   // user-reported pattern.  PATCH-SENDFILE-1 makes SendFile copy the source at
