@@ -1,4 +1,4 @@
-﻿program HorseICSParamTestServer;
+program HorseICSParamTestServer;
 
 {$APPTYPE CONSOLE}
 {$DEFINE HORSE_PROVIDER_ICS}
@@ -284,6 +284,28 @@ begin
       Res.Cookie('sid', 'abc123').Path('/').HttpOnly(True).SameSite(ssLax);
       Res.Cookie('theme', 'dark').MaxAge(3600);
       Res.ContentType('text/plain').Send('cookies-set');
+    end
+  );
+
+  // ── Binary request body (Section L — verifies FIX-BINBODY-1) ─────────────────
+  // A body of arbitrary bytes (0..255) is not valid UTF-8. Before FIX-BINBODY-1,
+  // DispatchWithBody decoded it with TEncoding.UTF8.GetString before Validate
+  // and before any pool work, so EEncodingError escaped into the ICS callback
+  // and the request died with a 500 — this handler never ran.
+  //
+  // Reaching this handler at all IS the assertion. textLen is reported so the
+  // client can confirm it got the handler's own JSON rather than an error page.
+  // It will be 0: ICS carries the body as a string and never registers a body
+  // stream, so binary bytes cannot survive the trip regardless of this guard.
+  // See the Section L comment in the client for why nothing stronger is claimed.
+  THorse.Post('/body/binary',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    var
+      LText: string;
+    begin
+      LText := Req.Body;   // must not raise
+      Res.ContentType('application/json; charset=utf-8')
+         .Send(Format('{"textLen":%d}', [Length(LText)]));
     end
   );
 

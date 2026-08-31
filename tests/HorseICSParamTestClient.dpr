@@ -1,4 +1,4 @@
-﻿program HorseICSParamTestClient;
+program HorseICSParamTestClient;
 
 {$APPTYPE CONSOLE}
 
@@ -196,6 +196,47 @@ begin
 end;
 
 { Synchronous HTTP request via TCrossHttpClient. Returns True if not timed out. }
+{ Raw-bytes variant of DoSync. DoSync builds its body with
+  TEncoding.UTF8.GetBytes, which by construction can only ever produce valid
+  UTF-8 — so it cannot express the payload FIX-BINBODY-1 is about. This sends
+  the byte array untouched. }
+function DoSyncBytes(
+  const AClient:  TCrossHttpClient;
+  const AMethod:  string;
+  const AUrl:     string;
+  const ABody:    TBytes;
+  const AContentType: string;
+  out   AResult:  TReqResult
+): Boolean;
+var
+  LEvent:   TEvent;
+  LLocal:   TReqResult;
+  LHeaders: THttpHeader;
+begin
+  LLocal := Default(TReqResult);
+  LEvent := TEvent.Create(nil, True, False, '');
+  LHeaders := THttpHeader.Create;
+  try
+    LHeaders['Content-Type'] := AContentType;
+    AClient.DoRequest(AMethod, AUrl, LHeaders, ABody, nil, nil,
+      procedure(const AResp: ICrossHttpClientResponse)
+      begin
+        if AResp <> nil then
+        begin
+          LLocal.StatusCode := AResp.StatusCode;
+          LLocal.Body       := StreamToStr(AResp.Content);
+        end;
+        LEvent.SetEvent;
+      end);
+    LLocal.TimedOut := (LEvent.WaitFor(TIMEOUT_MS) <> wrSignaled);
+  finally
+    LHeaders.Free;
+    LEvent.Free;
+  end;
+  AResult := LLocal;
+  Result  := not AResult.TimedOut;
+end;
+
 function DoSync(
   const AClient:  TCrossHttpClient;
   const AMethod:  string;
@@ -357,6 +398,7 @@ var
   LConc:    array[0..7] of TConcSlot;
   LAllOK:   Boolean;
   LFailed:  string;
+  LBinBody: TBytes;   { Section L — FIX-BINBODY-1 }
   J:        Integer;
 
   procedure Section(const ATitle: string);
@@ -769,6 +811,69 @@ begin
   end
   else
     Check('K1  GET /cookies', False, 'timeout');
+
+  // ════════════════════════════════════════════════════════════════════════════
+  Section('L  Binary request body must not abort the request (FIX-BINBODY-1)');
+  // ════════════════════════════════════════════════════════════════════════════
+  //
+  // Payload is every byte value 0..255 — guaranteed invalid UTF-8 (NUL, lone
+  // continuation bytes, truncated multi-byte leaders). Before FIX-BINBODY-1,
+  // THorseProviderICS.DispatchWithBody decoded the body with
+  // TEncoding.UTF8.GetString before Validate and before any pool work, so
+  // EEncodingError ('No mapping for the Unicode character...') escaped into the
+  // ICS callback and killed the request with a 500 that no handler-level
+  // try/except could catch.
+  //
+  // What this asserts is deliberately narrower than the CrossSocket and nghttp2
+  // equivalents. Those check the bytes survive; ICS cannot make that promise.
+  // It carries the body as a string end-to-end (TICSRequestView.BodyText ->
+  // TICSRequestSnapshot.Body -> SetBodyString) and never registers a body
+  // stream, so Req.Body<TStream> is always nil here and the bytes are gone
+  // whether or not the decode raises. The guard converts a crash into a clean,
+  // empty-bodied 200 — that is the whole of the fix, and the whole of the
+  // claim. Binary support on ICS needs a byte-preserving path first; when that
+  // lands, tighten this to assert size and checksum like the others.
+  // L0 is a POSITIVE CONTROL and must run first. Without it L1 is not a real
+  // assertion: the guard only fires when ABodyLen > 0, so if this route never
+  // received a body at all, L1 and L2 would pass identically on fixed and
+  // unfixed code (200, textLen 0, handler ran) and the section would prove
+  // nothing. L0 POSTs valid UTF-8 to the SAME route and requires a non-zero
+  // textLen — establishing that bodies do arrive here. Only then does L1's 200
+  // mean the decode was reached and survived.
+  //
+  // If L0 ever fails, L1/L2 are void regardless of what they report.
+  LBinBody := TEncoding.UTF8.GetBytes('CONTROL-PAYLOAD-0123456789');
+  if DoSyncBytes(AClient, 'POST', BASE_URL + '/body/binary', LBinBody,
+       'application/octet-stream', R) then
+    Check('L0  CONTROL: valid-UTF-8 body to the same route -> textLen 26',
+      (R.StatusCode = 200) and (Pos('"textLen":26', R.Body) > 0),
+      Format('status=%d body=<%s>  (if this fails, L1/L2 below prove nothing)',
+        [R.StatusCode, R.Body]))
+  else
+    Check('L0  CONTROL: valid-UTF-8 body to the same route', False, 'timeout');
+
+  SetLength(LBinBody, 256);
+  for I := 0 to 255 do
+    LBinBody[I] := Byte(I);
+
+  if DoSyncBytes(AClient, 'POST', BASE_URL + '/body/binary', LBinBody,
+       'application/octet-stream', R) then
+  begin
+    Check('L1  POST /body/binary -> 200, not 500 (no EEncodingError escaped)',
+      R.StatusCode = 200,
+      Format('status=%d body=<%s>', [R.StatusCode, R.Body]));
+
+    Check('L2  handler ran (response is the handler''s JSON, not an error page)',
+      Pos('"textLen"', R.Body) > 0, R.Body);
+  end
+  else
+    Check('L1  POST /body/binary', False, 'timeout');
+
+  if DoSync(AClient, 'GET', BASE_URL + '/mem/pool', '', R) then
+    Check('L3  pool healthy after binary body', R.StatusCode = 200,
+      Format('status=%d', [R.StatusCode]))
+  else
+    Check('L3  pool healthy after binary body', False, 'timeout');
 
 end;
 

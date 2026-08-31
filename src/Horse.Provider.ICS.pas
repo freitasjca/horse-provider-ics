@@ -798,10 +798,28 @@ var
   LBody:    string;
   LPending: TICSPendingRequest;
 begin
+  // [FIX-BINBODY-1] A binary body (protobuf, sfBinary, an image, a file upload)
+  // is not valid UTF-8, and TEncoding.GetString raises EEncodingError ('No
+  // mapping for the Unicode character...') when a non-empty input decodes to
+  // zero chars.  This decode runs before Validate and before any pool work, so
+  // the exception escaped into the ICS callback and killed the request with a
+  // 500 that no handler-level try/except could catch.
+  //
+  // NOTE: degrading to '' stops the crash but does NOT make binary bodies work.
+  // ICS v1 carries the body as a string end-to-end (TICSRequestView.BodyText ->
+  // TICSRequestSnapshot.Body -> SetBodyString); it never registers a body
+  // stream, so Req.Body<TStream> is always nil on this provider and the bytes
+  // are gone either way.  Real binary support needs a byte-preserving path —
+  // tracked separately, not something this guard provides.
+  LBody := '';
   if ABodyLen > 0 then
-    LBody := TEncoding.UTF8.GetString(ABody, 0, Integer(ABodyLen))
-  else
-    LBody := '';
+  begin
+    try
+      LBody := TEncoding.UTF8.GetString(ABody, 0, Integer(ABodyLen));
+    except
+      LBody := '';
+    end;
+  end;
 
   LView := BuildView(Client, LBody);
 

@@ -276,7 +276,20 @@ begin
   AStream.Position := 0;
   SetLength(LBytes, AStream.Size);
   AStream.Read(LBytes[0], AStream.Size);
-  Result := TEncoding.UTF8.GetString(LBytes);
+  // [FIX-BINBODY-1] Response-side mirror of the request-side guard. A handler
+  // that calls Res.SendFile/Download with a binary stream (a PDF, an image, a
+  // TFDMemTable sfBinary export) lands here, and TEncoding.GetString raises
+  // EEncodingError on bytes that are not valid UTF-8 — turning a valid binary
+  // response into a 500.
+  //
+  // As on the request side this only converts a crash into an empty body: ICS
+  // v1 carries the response body as a string, so binary content cannot survive
+  // this function regardless. Serving binary from ICS needs a bytes path.
+  try
+    Result := TEncoding.UTF8.GetString(LBytes);
+  except
+    Result := '';
+  end;
 end;
 
 class function TICSResponseBridge.WriteBody(
