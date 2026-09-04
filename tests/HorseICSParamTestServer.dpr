@@ -309,6 +309,40 @@ begin
     end
   );
 
+  // ── Duplicate Set-Cookie via AddHeader (Section O — verifies REPEATHDR-1) ───
+  // Deliberately uses the RAW Res.AddHeader path, not the typed Res.Cookie API
+  // that /cookies exercises — they use different storage and only this one was
+  // broken. CustomHeaders is a TDictionary on Delphi, so the second AddHeader
+  // with the same name overwrote the first; Horse core keeps every occurrence
+  // in the ordered RepeatHeaders side-store, which this bridge never read.
+  // Result: the first cookie vanished, 200, nothing logged.
+  THorse.Get('/cookies/dup',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      Res.AddHeader('Set-Cookie', 'session=abc123; Path=/');
+      Res.AddHeader('Set-Cookie', 'user=tester; Path=/');
+      Res.ContentType('application/json; charset=utf-8')
+         .Send('{"status":"cookies set"}');
+    end
+  );
+
+  // ── Res.Send(TBytes) (Section N — verifies FIX-BODYBYTES-1) ─────────────────
+  // Horse core's Send(TBytes) writes the FCSBodyBytes shadow slot (public
+  // BodyBytes). TICSResponseBridge.WriteBody read ContentStream, BodyText and
+  // RawWebResponse but never BodyBytes, so this returned 200 with an empty
+  // body — no exception, no log entry, nothing to notice.
+  //
+  // ASCII payload: on ICS the body is a string end-to-end, so a text payload is
+  // the only kind Send(TBytes) can carry here at all. That limitation is the
+  // provider's, not this test's.
+  THorse.Get('/body/bytes',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      Res.ContentType('application/octet-stream');
+      Res.Send(TEncoding.UTF8.GetBytes('BODYBYTES-OK-0123456789'));
+    end
+  );
+
   // ── Binary RESPONSE body (Section M — verifies FIX-BINBODY-1, response side) ─
   // Mirror of /body/binary for the other direction. TICSResponseBridge's
   // TryReadBodyStream decoded the response ContentStream with

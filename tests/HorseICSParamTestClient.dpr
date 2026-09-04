@@ -921,6 +921,59 @@ begin
   else
     Check('M3  pool healthy after binary response', False, 'timeout');
 
+  // ════════════════════════════════════════════════════════════════════════════
+  Section('N  Res.Send(TBytes) must reach the client (FIX-BODYBYTES-1)');
+  // ════════════════════════════════════════════════════════════════════════════
+  //
+  // Horse core's Send(TBytes) writes the FCSBodyBytes shadow slot, exposed as
+  // the public BodyBytes property. WriteBody read ContentStream, BodyText and
+  // RawWebResponse but never BodyBytes, so the response fell through to the
+  // empty tail: HTTP 200, no payload, no exception, nothing logged.
+  //
+  // N1 (status) would have passed before the fix — a 200 was always returned.
+  // N2 is the assertion that actually discriminates.
+  if DoSync(AClient, 'GET', BASE_URL + '/body/bytes', '', R) then
+  begin
+    Check('N1  GET /body/bytes -> 200', R.StatusCode = 200,
+      Format('status=%d', [R.StatusCode]));
+
+    Check('N2  body matches the bytes the handler sent (was empty before)',
+      R.Body = 'BODYBYTES-OK-0123456789',
+      Format('len=%d body=<%s>', [Length(R.Body), R.Body]));
+  end
+  else
+    Check('N1  GET /body/bytes', False, 'timeout');
+
+  // ════════════════════════════════════════════════════════════════════════════
+  Section('O  Duplicate Set-Cookie via Res.AddHeader (REPEATHDR-1)');
+  // ════════════════════════════════════════════════════════════════════════════
+  //
+  // Section K already covers two cookies — but via the TYPED Res.Cookie API,
+  // which iterates AHorseRes.Cookies. This route uses the RAW Res.AddHeader
+  // path instead, which lands in CustomHeaders: a TDictionary on Delphi, so the
+  // second call overwrote the first. Horse core (REPEATHDR-1) preserves every
+  // occurrence in the ordered RepeatHeaders side-store, and this bridge never
+  // read it — so the FIRST cookie was silently dropped while the response
+  // stayed 200.
+  //
+  // K passing is exactly why this went unnoticed: two different storage paths,
+  // one tested, one not. O1 asserts the one that was lost, O2 the one that
+  // always survived — if O2 alone were checked the section would prove nothing.
+  if DoSync(AClient, 'GET', BASE_URL + '/cookies/dup', '', R) then
+  begin
+    Check('O1  session=abc123 present (the one that used to vanish)',
+      Pos('session=abc123', R.Cookies) > 0,
+      Format('set-cookie=<%s>',
+        [StringReplace(R.Cookies, #10, ' | ', [rfReplaceAll])]));
+
+    Check('O2  user=tester also present (both survive, not one)',
+      Pos('user=tester', R.Cookies) > 0,
+      Format('set-cookie=<%s>',
+        [StringReplace(R.Cookies, #10, ' | ', [rfReplaceAll])]));
+  end
+  else
+    Check('O1  GET /cookies/dup', False, 'timeout');
+
 end;
 
 // ── Entry point ────────────────────────────────────────────────────────────────

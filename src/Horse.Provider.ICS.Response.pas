@@ -230,15 +230,40 @@ begin
     begin
       LName := AHorseRes.CustomHeaders.Names[I];
       LVal  := AHorseRes.CustomHeaders.ValueFromIndex[I];
-      if LName <> '' then
+      { REPEATHDR-1 — skip Set-Cookie here; this shadow store collapses repeats.
+        Every occurrence is emitted from RepeatHeaders below instead. }
+      if (LName <> '') and not SameText(LName, 'Set-Cookie') then
         EmitHeader(LHeaders, LName, LVal);
     end;
     {$ELSE}
     for LPair in AHorseRes.CustomHeaders do
-      if LPair.Key <> '' then
+      if (LPair.Key <> '') and not SameText(LPair.Key, 'Set-Cookie') then
         EmitHeader(LHeaders, LPair.Key, LPair.Value);
     {$ENDIF}
   end;
+
+  // [REPEATHDR-1] Set-Cookie added via Res.AddHeader collapses in CustomHeaders
+  // — a TDictionary on Delphi, so only the LAST value survives. Two calls to
+  // Res.AddHeader('Set-Cookie', ...) kept the second and silently dropped the
+  // first, returning 200 with nothing logged.
+  //
+  // Horse core (REPEATHDR-1) appends every Set-Cookie verbatim to the ordered
+  // RepeatHeaders side-store so adapter providers can emit them all, and
+  // deliberately KEEPS the deduped entry above so bridges that have not adopted
+  // RepeatHeaders keep working unchanged. That is why the loop above must SKIP
+  // Set-Cookie once this loop exists — otherwise the last cookie goes out twice.
+  //
+  // Independent of the Cookies loop below: that serves the typed Res.Cookie(...)
+  // API, this one the raw Res.AddHeader path. Section K exercised only the
+  // former, which is why this gap survived undetected.
+  if Assigned(AHorseRes.RepeatHeaders) then
+    for I := 0 to AHorseRes.RepeatHeaders.Count - 1 do
+    begin
+      LName := AHorseRes.RepeatHeaders.Names[I];
+      LVal  := AHorseRes.RepeatHeaders.ValueFromIndex[I];
+      if LName <> '' then
+        EmitHeader(LHeaders, LName, LVal);
+    end;
 
   // [COMPAT-1] middleware-set headers via RawWebResponse.SetCustomHeader
   LRaw := AHorseRes.RawWebResponse;
@@ -308,6 +333,33 @@ begin
   Stream := AHorseRes.ContentStream;
   if Assigned(Stream) and (Stream.Size > 0) then
     Exit(TryReadBodyStream(Stream));
+
+  // [FIX-BODYBYTES-1] BodyBytes — the shadow slot written by Res.Send(TBytes).
+  //
+  // Horse core's Send(const AContent: TBytes) stores into FCSBodyBytes on the
+  // shadow path (FWebResponse = nil — every non-WebBroker provider) and exposes
+  // it as the public BodyBytes property. This bridge never read that slot, so
+  // Res.Send(SomeBytes) fell through BodyText (still empty) to the empty tail:
+  // the client received 200 with no payload and nothing logged anywhere.
+  //
+  // The decode is guarded for the same reason as the request side: WriteBody
+  // returns a *string*, so bytes that are not valid UTF-8 would raise
+  // EEncodingError here and turn the response into a 500. See FIX-BINBODY-1.
+  //
+  // Scope, stated plainly: this repairs Send(TBytes) for TEXT payloads only.
+  // ICS carries the response body as a string end-to-end, so a genuinely binary
+  // TBytes still cannot survive this function — it degrades to an empty body
+  // rather than crashing. Real binary responses need the byte-preserving path
+  // this provider does not yet have; the same limitation applies to SendFile
+  // and Download here.
+  if Length(AHorseRes.BodyBytes) > 0 then
+  begin
+    try
+      Exit(TEncoding.UTF8.GetString(AHorseRes.BodyBytes));
+    except
+      Exit('');
+    end;
+  end;
 
   if AHorseRes.BodyText <> '' then
     Exit(AHorseRes.BodyText);
