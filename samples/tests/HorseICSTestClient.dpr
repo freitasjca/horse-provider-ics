@@ -27,7 +27,7 @@
     12  POST   /upload (multipart)           → 200 or 400 (ICS v1 multipart limitation)
     13  GET    /download                     → 200 Content-Disposition + body
     14  GET    /headers/echo                 → 200 custom header echoed back
-    15  POST   /methods/post  empty body     → 200 or 400 (ICS v1 empty-body POST)
+    15  POST   /methods/post  empty body     → 200 "body":"" (explicit Content-Length: 0)
     16  POST   /echo/body  large (64 KB)     → 200 "size":65536 exact
     17  POST   /echo/body  sequential (A→B)  → no body leakage between pooled requests
     18  POST   /echo/body  concurrent (×4)   → no cross-contamination in parallel pool use
@@ -58,10 +58,10 @@
   level; the route returns 400 {"received":false,...}.  The check accepts 200
   (if a future bridge revision adds multipart support) or a structured 400.
 
-  Note on test 15: ICS v1 rejects POST requests with a nil/zero-length body
-  at the transport level, returning an HTML 400 before the Horse pipeline is
-  entered.  The check accepts 200 (expected on CrossSocket/mORMot) or 400
-  (ICS transport-level rejection).
+  Note on test 15: ICS rejects a POST that carries NO Content-Length header
+  with its own HTML 400, before the Horse pipeline is entered. TCrossHttpClient
+  omits the header for an empty body, so the test now sends Content-Length: 0
+  explicitly and asserts the same 200 + "body":"" as CrossSocket/mORMot.
 
   Note on tests 33–36: OverbyteICS uses a PostMessage marshal-back pattern
   for the worker-pool bridge — it cannot hold the ICS reply open while a
@@ -82,6 +82,7 @@ uses
 const
   BASE_URL            = 'http://127.0.0.1:9010';
   TIMEOUT_MS          = 8000;
+  CALLBACK_FAILED     = -1;    // [HARNESS-CB-1] StatusCode when a response callback raised
   LARGE_RESPONSE_SIZE = 65536;
   LARGE_BODY_SIZE     = 65536;
   CONCURRENT_COUNT    = 4;
@@ -186,14 +187,29 @@ begin
     AClient.DoRequest(AMethod, AUrl, AHeaders, ABody, nil, nil,
       procedure(const AResp: ICrossHttpClientResponse)
       begin
-        LCallbackTicks := LSWReq.ElapsedMilliseconds;
-        if AResp <> nil then
-        begin
-          LResult.StatusCode := AResp.StatusCode;
-          LResult.Body       := StreamToStr(AResp.Content);
-          LResult.Response   := AResp;
+        // [HARNESS-CB-1] SetEvent runs in finally. StreamToStr raises on a body
+        // that is not valid UTF-8; before this, the exception skipped SetEvent,
+        // the caller waited out TIMEOUT_MS, and the StatusCode already stored
+        // made a "status 200" check pass on a request that really failed.
+        try
+          try
+            LCallbackTicks := LSWReq.ElapsedMilliseconds;
+            if AResp <> nil then
+            begin
+              LResult.StatusCode := AResp.StatusCode;
+              LResult.Body       := StreamToStr(AResp.Content);
+              LResult.Response   := AResp;
+            end;
+          except
+            on E: Exception do
+            begin
+              LResult.StatusCode := CALLBACK_FAILED;
+              LResult.Body       := 'CALLBACK EXCEPTION ' + E.ClassName + ': ' + E.Message;
+            end;
+          end;
+        finally
+          LEvent.SetEvent;
         end;
-        LEvent.SetEvent;
       end);
     LResult.TimedOut := (LEvent.WaitFor(TIMEOUT_MS) <> wrSignaled);
     LSWReq.Stop;
@@ -211,6 +227,15 @@ begin
     LEvent.Free;
   end;
   AResult := LResult;
+  // [HARNESS-CB-1] A timeout must fail every check: a callback that lands after
+  // WaitFor gave up can still have written StatusCode, so clear it here.
+  if AResult.TimedOut then
+  begin
+    AResult.StatusCode := 0;
+    AResult.Body       := '';
+  end
+  else if AResult.StatusCode = CALLBACK_FAILED then
+    Writeln('  ERROR  ' + AResult.Body);
   Result  := not AResult.TimedOut;
   ReportTiming(AMethod + ' ' + AUrl, LResult.ServerMs, LResult.ClientMs,
     LResult.TimedOut);
@@ -237,14 +262,29 @@ begin
     AClient.DoRequest('POST', AUrl, AHeaders, ABody, nil, nil,
       procedure(const AResp: ICrossHttpClientResponse)
       begin
-        LCallbackTicks := LSWReq.ElapsedMilliseconds;
-        if AResp <> nil then
-        begin
-          LResult.StatusCode := AResp.StatusCode;
-          LResult.Body       := StreamToStr(AResp.Content);
-          LResult.Response   := AResp;
+        // [HARNESS-CB-1] SetEvent runs in finally. StreamToStr raises on a body
+        // that is not valid UTF-8; before this, the exception skipped SetEvent,
+        // the caller waited out TIMEOUT_MS, and the StatusCode already stored
+        // made a "status 200" check pass on a request that really failed.
+        try
+          try
+            LCallbackTicks := LSWReq.ElapsedMilliseconds;
+            if AResp <> nil then
+            begin
+              LResult.StatusCode := AResp.StatusCode;
+              LResult.Body       := StreamToStr(AResp.Content);
+              LResult.Response   := AResp;
+            end;
+          except
+            on E: Exception do
+            begin
+              LResult.StatusCode := CALLBACK_FAILED;
+              LResult.Body       := 'CALLBACK EXCEPTION ' + E.ClassName + ': ' + E.Message;
+            end;
+          end;
+        finally
+          LEvent.SetEvent;
         end;
-        LEvent.SetEvent;
       end);
     LResult.TimedOut := (LEvent.WaitFor(TIMEOUT_MS) <> wrSignaled);
     LSWReq.Stop;
@@ -262,6 +302,15 @@ begin
     LEvent.Free;
   end;
   AResult := LResult;
+  // [HARNESS-CB-1] A timeout must fail every check: a callback that lands after
+  // WaitFor gave up can still have written StatusCode, so clear it here.
+  if AResult.TimedOut then
+  begin
+    AResult.StatusCode := 0;
+    AResult.Body       := '';
+  end
+  else if AResult.StatusCode = CALLBACK_FAILED then
+    Writeln('  ERROR  ' + AResult.Body);
   Result  := not AResult.TimedOut;
   ReportTiming('POST ' + AUrl + ' (multipart)',
     LResult.ServerMs, LResult.ClientMs, LResult.TimedOut);
@@ -291,6 +340,35 @@ begin
       Result := Copy(First, EqPos + 1, MaxInt);
       Exit;
     end;
+  end;
+end;
+
+// [FIX-DECODE-ONCE-1] Extract the string value of AKey from the flat JSON
+// object the test server's DecodeReport builds. Undoes only the two escapes
+// the server's JE helper emits (backslash and double quote). Returns
+// '<missing>' when the key is absent, so a failed check shows why.
+function JsonField(const ABody, AKey: string): string;
+var
+  LPos: Integer;
+  LCh:  Char;
+begin
+  Result := '';
+  LPos := Pos('"' + AKey + '":"', ABody);
+  if LPos = 0 then
+    Exit('<missing>');
+  LPos := LPos + Length(AKey) + 4;
+  while LPos <= Length(ABody) do
+  begin
+    LCh := ABody[LPos];
+    if LCh = '"' then
+      Exit;
+    if (LCh = '\') and (LPos < Length(ABody)) then
+    begin
+      Inc(LPos);
+      LCh := ABody[LPos];
+    end;
+    Result := Result + LCh;
+    Inc(LPos);
   end;
 end;
 
@@ -345,12 +423,24 @@ var
       nil, nil,
       procedure(const AResp: ICrossHttpClientResponse)
       begin
-        if AResp <> nil then
-        begin
-          LBurstBatch[AIdx].Status := AResp.StatusCode;
-          LBurstBatch[AIdx].Body   := StreamToStr(AResp.Content);
+        // [HARNESS-CB-1] SetEvent runs in finally; see DoSync.
+        try
+          try
+            if AResp <> nil then
+            begin
+              LBurstBatch[AIdx].Status := AResp.StatusCode;
+              LBurstBatch[AIdx].Body   := StreamToStr(AResp.Content);
+            end;
+          except
+            on E: Exception do
+            begin
+              LBurstBatch[AIdx].Status := CALLBACK_FAILED;
+              LBurstBatch[AIdx].Body   := 'CALLBACK EXCEPTION ' + E.ClassName + ': ' + E.Message;
+            end;
+          end;
+        finally
+          LBurstBatch[AIdx].Event.SetEvent;
         end;
-        LBurstBatch[AIdx].Event.SetEvent;
       end);
   end;
 
@@ -363,12 +453,24 @@ var
       nil, nil,
       procedure(const AResp: ICrossHttpClientResponse)
       begin
-        if AResp <> nil then
-        begin
-          LBatch[AIdx].Status := AResp.StatusCode;
-          LBatch[AIdx].Body   := StreamToStr(AResp.Content);
+        // [HARNESS-CB-1] SetEvent runs in finally; see DoSync.
+        try
+          try
+            if AResp <> nil then
+            begin
+              LBatch[AIdx].Status := AResp.StatusCode;
+              LBatch[AIdx].Body   := StreamToStr(AResp.Content);
+            end;
+          except
+            on E: Exception do
+            begin
+              LBatch[AIdx].Status := CALLBACK_FAILED;
+              LBatch[AIdx].Body   := 'CALLBACK EXCEPTION ' + E.ClassName + ': ' + E.Message;
+            end;
+          end;
+        finally
+          LBatch[AIdx].Event.SetEvent;
         end;
-        LBatch[AIdx].Event.SetEvent;
       end);
   end;
 
@@ -381,13 +483,61 @@ var
       nil, TBytes(nil), nil, nil,
       procedure(const AResp: ICrossHttpClientResponse)
       begin
-        if AResp <> nil then
-        begin
-          LStreamBatch[AIdx].Status := AResp.StatusCode;
-          LStreamBatch[AIdx].Body   := StreamToStr(AResp.Content);
+        // [HARNESS-CB-1] SetEvent runs in finally; see DoSync.
+        try
+          try
+            if AResp <> nil then
+            begin
+              LStreamBatch[AIdx].Status := AResp.StatusCode;
+              LStreamBatch[AIdx].Body   := StreamToStr(AResp.Content);
+            end;
+          except
+            on E: Exception do
+            begin
+              LStreamBatch[AIdx].Status := CALLBACK_FAILED;
+              LStreamBatch[AIdx].Body   := 'CALLBACK EXCEPTION ' + E.ClassName + ': ' + E.Message;
+            end;
+          end;
+        finally
+          LStreamBatch[AIdx].Event.SetEvent;
         end;
-        LStreamBatch[AIdx].Event.SetEvent;
       end);
+  end;
+
+  // ── Tests 41-45 helper — one URL-decode case (FIX-DECODE-ONCE-1) ─────────────
+  // Sends the request, then asserts that Field, the first indexed read and a
+  // repeated indexed read ALL return the once-decoded value. ABody = '' sends
+  // no body; otherwise it is sent as application/x-www-form-urlencoded.
+  procedure CheckDecodeCase(const ATitle, AMethod, AUrl, ABody, AExpected: string);
+  var
+    LDecHeaders: THttpHeader;
+    LGot:        string;
+  begin
+    Section(ATitle);
+    if ABody = '' then
+      DoSync(AClient, AMethod, AUrl, nil, nil, R)
+    else
+    begin
+      LDecHeaders := THttpHeader.Create;
+      try
+        LDecHeaders['Content-Type'] := 'application/x-www-form-urlencoded';
+        DoSync(AClient, AMethod, AUrl, LDecHeaders,
+          TEncoding.UTF8.GetBytes(ABody), R);
+      finally
+        LDecHeaders.Free;
+      end;
+    end;
+    Check('status 200', R.StatusCode = 200,
+      IntToStr(R.StatusCode) + ' / ' + R.Body);
+    LGot := JsonField(R.Body, 'field');
+    Check('Field(v).AsString = the once-decoded value (what the bridge stored)',
+      LGot = AExpected, 'got "' + LGot + '" expected "' + AExpected + '"');
+    LGot := JsonField(R.Body, 'get');
+    Check('indexed read [v] decoded exactly once',
+      LGot = AExpected, 'got "' + LGot + '" expected "' + AExpected + '"');
+    LGot := JsonField(R.Body, 'again');
+    Check('repeated indexed read [v] still decoded exactly once',
+      LGot = AExpected, 'got "' + LGot + '" expected "' + AExpected + '"');
   end;
 
 begin
@@ -541,20 +691,26 @@ begin
   Check('X-Test-Header value echoed', Pos('HelloFromClient', R.Body) > 0, R.Body);
 
   // ── 15 ───────────────────────────────────────────────────────────────────────
-  // ICS v1 rejects POST with no body at the transport layer (HTML 400 before
-  // the Horse pipeline is entered).  Accept 200 or 400 here.
-  Section('15  POST /methods/post  (empty body — nil-body path)');
+  // POST with an empty body. TCrossHttpClient adds Content-Length only when the
+  // body has bytes, and ICS answers a POST with NO Content-Length with its own
+  // HTML 400 before the provider ever sees it (curl: 10/10 "400 172"). That is
+  // why this test used to accept 200-or-400, and why its body check was
+  // effectively dead: the 200 branch could only run on a mismatched response.
+  // Sending Content-Length: 0 explicitly (the client copies caller headers and
+  // never strips this one) takes the real path: ICS dispatches immediately and
+  // Horse answers {"method":"POST","body":""} (curl: 10/10 "200 27"). Same
+  // assertions as the CrossSocket and mORMot suites.
+  Section('15  POST /methods/post  (empty body, Content-Length: 0)');
   LHeaders := THttpHeader.Create;
   try
-    LHeaders['Content-Type'] := 'application/json; charset=utf-8';
+    LHeaders['Content-Type']   := 'application/json; charset=utf-8';
+    LHeaders['Content-Length'] := '0';
     DoSync(AClient, 'POST', BASE_URL + '/methods/post', LHeaders, nil, R);
   finally
     LHeaders.Free;
   end;
-  Check('status 200 or 400 (ICS v1 empty-body POST limitation)',
-    (R.StatusCode = 200) or (R.StatusCode = 400), IntToStr(R.StatusCode));
-  if R.StatusCode = 200 then
-    Check('"body":""', Pos('"body":""', R.Body) > 0, R.Body);
+  Check('status 200', R.StatusCode = 200, IntToStr(R.StatusCode) + ' / ' + R.Body);
+  Check('"body":""',  Pos('"body":""', R.Body) > 0, R.Body);
 
   // ── 16 ───────────────────────────────────────────────────────────────────────
   Section(Format('16  POST /echo/body  (%d-byte body — large body read)',
@@ -902,6 +1058,29 @@ begin
   Check('server healthy after concurrent streaming probes',
     (R.StatusCode = 200) and (R.Body = 'pong'),
     Format('%d / %s', [R.StatusCode, R.Body]));
+
+  // ── 41-45  Query / form values are URL-decoded exactly once ─────────────────
+  // [FIX-DECODE-ONCE-1] Numbered to match the CrossSocket suite. Twenty checks.
+  // New failures expected, by combination:
+  //   provider UNFIXED + Horse unpatched : 10  (raw store: Field always raw,
+  //                                            [v]-again re-decodes, and 45's
+  //                                            form pair was stored as the KEY)
+  //   provider UNFIXED + Horse PATCHED   : 15  (nothing decodes at all)
+  //   provider FIXED   + Horse unpatched :  8  (same as CrossSocket unpatched)
+  //   provider FIXED   + Horse PATCHED   :  0
+  // Any other count means the model of the bug is wrong: stop and look.
+  // URLs are fully percent-encoded on purpose: TCrossHttpClient decodes the
+  // query and re-encodes it strictly, so only canonical input survives.
+  CheckDecodeCase('41  GET /params/decode?v=100%25  (trailing percent - the reported message)',
+    'GET', BASE_URL + '/params/decode?v=100%25', '', '100%');
+  CheckDecodeCase('42  GET /params/decode?v=50%25off  (percent mid-value)',
+    'GET', BASE_URL + '/params/decode?v=50%25off', '', '50%off');
+  CheckDecodeCase('43  GET /params/decode?v=a%2B%2541  (silent corruption to "a A")',
+    'GET', BASE_URL + '/params/decode?v=a%2B%2541', '', 'a+%41');
+  CheckDecodeCase('44  GET /params/decode?v=caf%C3%A9  (UTF-8 control)',
+    'GET', BASE_URL + '/params/decode?v=caf%C3%A9', '', 'caf' + #$00E9);
+  CheckDecodeCase('45  PUT /params/decode-form  body v=100%25  (form-urlencoded - ContentFields)',
+    'PUT', BASE_URL + '/params/decode-form', 'v=100%25', '100%');
 
 end;
 

@@ -32,11 +32,11 @@ unit Horse.Provider.ICS;
                                        PostMessage(loopWnd, WM_X,
                                                    token) ──────►
                                                                   conn still alive?
-                                                                    AnswerString(...)
+                                                                    AnswerBodyTB(...)
                                                                   release pool ctx
 
   Snapshots are owned by the worker; the marshal-back handler frees them
-  after AnswerString returns.
+  after AnswerBodyTB returns (UTF-8 bytes -- see FIX-ICS-UTF8-BODY).
 
   ── Hardening (mirrors the mORMot/CrossSocket providers) ──────────────────
     [SEC-29] Validate-before-pool — invalid requests get a direct 4xx
@@ -923,12 +923,14 @@ begin
         if Assigned(APending.Conn) then
         begin
           LFlags := hgWillSendMySelf;
-          APending.Conn.AnswerString(
+          // [FIX-ICS-UTF8-BODY] UTF-8 bytes via AnswerBodyTB -- see the
+          // marshal-back answer below for why AnswerString is not used.
+          APending.Conn.AnswerBodyTB(
             LFlags,
             '503 Service Unavailable',
             'application/json; charset=utf-8',
             'Cache-Control: no-store'#13#10,
-            '{"error":"Service Unavailable"}');
+            TEncoding.UTF8.GetBytes('{"error":"Service Unavailable"}'));
         end;
       except
         // connection might already be dead — swallow
@@ -1033,12 +1035,21 @@ begin
 
   LFlags := hgWillSendMySelf;
   try
-    APending.Conn.AnswerString(
+    // [FIX-ICS-UTF8-BODY] AnswerBodyTB with explicit UTF-8 bytes, NOT
+    // AnswerString. ICS's AnswerString wraps the body in
+    // TStringStream.Create(Body), which encodes with TEncoding.Default -- the
+    // ANSI code page on Windows (UTF-8 only on POSIX). So every non-ASCII
+    // response character went out as ANSI under a "charset=utf-8" header:
+    // mojibake in browsers, EEncodingError in strict UTF-8 clients. Found by
+    // test 44 (UTF-8 "cafe" with an acute e) once FIX-DECODE-ONCE-1 let a
+    // decoded non-ASCII value reach a response. AnswerBodyTB also goes through
+    // AnswerStream, so Content-Length (stream size) and HEAD are unchanged.
+    APending.Conn.AnswerBodyTB(
       LFlags,
       APending.Payload.Status,
       APending.Payload.ContentType,
       APending.Payload.Headers,
-      APending.Payload.Body);
+      TEncoding.UTF8.GetBytes(APending.Payload.Body));
     // System.Writeln('[DIAG ans] tok=', IntToStr(Int64(APending.Token)),
     //   ' AnswerString returned OK');   // DIAG (remove)
   except
@@ -1067,8 +1078,10 @@ begin
   LBody := Format('{"error":"%s"}',
     [StringReplace(AMessage, '"', '\"', [rfReplaceAll])]);
   try
-    Client.AnswerString(Flags, AStatus, 'application/json; charset=utf-8',
-      LHeader, LBody);
+    // [FIX-ICS-UTF8-BODY] UTF-8 bytes via AnswerBodyTB. AMessage can carry
+    // non-ASCII text, which AnswerString would send in the ANSI code page.
+    Client.AnswerBodyTB(Flags, AStatus, 'application/json; charset=utf-8',
+      LHeader, TEncoding.UTF8.GetBytes(LBody));
   except
     // Connection might be dead — swallow.
   end;
