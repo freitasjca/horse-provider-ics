@@ -97,7 +97,12 @@ type
     // Passphrase for the private key (if encrypted).
     SSLPassPhrase:   string;
 
-    // Require + verify client certificate (mutual TLS).
+    // Require + verify client certificate (mutual TLS). Set SSLCAFile too, or
+    // there is nothing to verify against.
+    // Genuinely REQUIRES a certificate as of FIX-ICS-MTLS-1 (2026-09-24). Before
+    // that this field set ICS's SslVerifyPeer alone, which only *requests* one:
+    // clients that declined were served anyway, so mTLS was configurable but
+    // never enforced. Verified by tests\run-tls-tests.bat (T4).
     SSLVerifyPeer:   Boolean;
 
     // Minimum negotiated TLS version.

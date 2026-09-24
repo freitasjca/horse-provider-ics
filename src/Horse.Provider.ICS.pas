@@ -452,6 +452,22 @@ begin
     if AConfig.SSLCAFile <> '' then
       FSslContext.SslCAFile      := AConfig.SSLCAFile;
     FSslContext.SslVerifyPeer    := AConfig.SSLVerifyPeer;
+    // [FIX-ICS-MTLS-1] SslVerifyPeer alone REQUESTS a client certificate but
+    // does not REQUIRE one. It maps to OpenSSL's SSL_VERIFY_PEER, and a server
+    // set that way sends a CertificateRequest and then accepts a client that
+    // declines to answer it — so every unauthenticated client was served
+    // normally while the configuration said mutual TLS was on. Nothing failed,
+    // nothing logged; the suite's T4 (GET without a client cert) returned 200.
+    //
+    // SSL_VERIFY_FAIL_IF_NO_PEER_CERT is what makes it mandatory. ICS exposes
+    // it through SslVerifyPeerModes, and this is ICS's own server-side
+    // spelling — see OverbyteIcsWSocketS.pas, which uses exactly this set.
+    // CrossSocket's provider has always passed the equivalent pair to
+    // SSL_CTX_set_verify; this one omitted it.
+    if AConfig.SSLVerifyPeer then
+      FSslContext.SslVerifyPeerModes :=
+        [SslVerifyMode_PEER, SslVerifyMode_FAIL_IF_NO_PEER_CERT,
+         SslVerifyMode_CLIENT_ONCE];
     FSslContext.SslVersionMethod := SslVersionMethodFromConfig;
     if AConfig.SSLCipherList <> '' then
       FSslContext.SslCipherList  := AConfig.SSLCipherList;

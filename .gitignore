@@ -98,3 +98,7 @@ tests/temp/*.dsv
 *.identcache
 *.local
 *.dsv
+
+# TLS test build output (build-tls-dcc.bat)
+tests/bin/
+tests/temp/

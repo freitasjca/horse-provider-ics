@@ -28,12 +28,45 @@ from this `tests/` folder); both programs locate it via `FindCertDir`.
 
 ## Build
 
-`HORSE_PROVIDER_ICS` is set inline at the top of the server `.dpr`. Add the ICS
-`Source/` folder and `horse-provider-ics/src` to the search path. The client
-needs `Delphi-Cross-Socket` on the search path (`TCrossHttpClient` is the HTTPS
-driver, same as the ICS param test client).
+```
+build-tls-dcc.bat            # Release (default); or: build-tls-dcc.bat Debug
+```
+
+Builds both programs into `bin\`, copies `certs\`, and copies ICS's OpenSSL DLLs
+(found under `icsv97\ICS-OpenSSL\`) beside them. Override the ICS location with
+`set "ICS_ROOT=<path to icsv97>"`; it defaults to the sibling checkout layout.
+Win64 only, run from this `tests\` folder.
+
+This pair has **no `.dproj`**, and msbuild is not a substitute on this toolchain —
+MSBuild's DCC task emits the IDE's whole global Library Path four times against a
+32000-character ceiling and dies on MSB6002/MSB6003. The script drives `dcc64`
+directly. The two programs need different unit paths and are built separately:
+the **server** is Horse + the ICS provider + ICS itself, the **client** is the
+shared `TCrossHttpClient` HTTPS driver from Delphi-Cross-Socket.
+
+> Until 2026-09-24 there was no build script and no `.dproj`, so this suite had
+> never been run since it was written — the provider source said as much
+> (*"SSL is not exercised by the current test suite"*). Its first run found
+> FIX-ICS-MTLS-1 below.
 
 ## Run
+
+```
+run-tls-tests.bat
+```
+
+Both passes, unattended. Exit **0** = all passed, **N** = N failed assertions,
+**2** = VOID (the suite did not run — port already held, or the server never
+bound). It refuses to start when port 9111 is occupied, because Windows lets a
+second process bind an already-owned port without error and the client would
+then be testing someone else's server. Server output goes to `bin\tls-oneway.log`
+and `bin\tls-mtls.log`.
+
+**Rebuild before believing a green run.** The sibling CrossSocket suite reported
+ALL PASSED from three-week-old binaries; a stale `.exe` passes exactly as
+convincingly as a current one. Watch the compiler's byte count change.
+
+### By hand
 
 **One-way TLS:**
 
@@ -56,14 +89,32 @@ HorseICSTLSTestClient mtls       # terminal 2  → T3, T4 pass
 | one-way | T1 `GET /ping` → 200 "pong" | TLS handshake + HTTPS round-trip (TSslHttpServer) |
 | one-way | T2 `POST /echo` → body echoed | request body survives the TLS path |
 | mTLS | T3 `GET /ping` **with** client cert → 200 | `SslVerifyPeer` accepts a CA-signed client cert |
-| mTLS | T4 `GET /ping` **without** client cert → rejected | `SSL_VERIFY_PEER \| FAIL_IF_NO_PEER_CERT` enforced |
+| mTLS | T4 `GET /ping` **without** client cert → rejected | `SSL_VERIFY_PEER \| FAIL_IF_NO_PEER_CERT` enforced — **true only since FIX-ICS-MTLS-1** |
+
+> **T4 is the assertion that matters, and it failed the first time it ran
+> (2026-09-24).** The provider set ICS's `SslVerifyPeer` and nothing else, which
+> maps to OpenSSL's `SSL_VERIFY_PEER` alone: the server *requests* a client
+> certificate and then serves any client that declines to send one. T4 returned
+> **200**. So mutual TLS was configurable, documented — this very row asserted
+> `FAIL_IF_NO_PEER_CERT` — and never enforced.
+>
+> The fix adds `SslVerifyPeerModes := [SslVerifyMode_PEER,
+> SslVerifyMode_FAIL_IF_NO_PEER_CERT, SslVerifyMode_CLIENT_ONCE]`, which is
+> ICS's own server-side spelling (see `OverbyteIcsWSocketS.pas`).
+>
+> Note what the other three assertions were worth here: T1, T2 and T3 all passed
+> against the broken build. A server that accepts everyone still completes
+> handshakes and still honours a valid certificate. **Only the negative case
+> could detect this**, which is why it is worth keeping even though "not 200" is
+> a weak assertion on its own.
 
 ## Provider config exercised
 
 `THorseICSConfig`: `SSLEnabled`, `SSLCertFile`, `SSLPrivKeyFile`, `SSLCAFile`,
 `SSLVerifyPeer`, `SSLVersionMethod` — passed via
 `THorseProviderICS.ListenWithConfig(9111, Config)`, wired onto ICS's
-`TSslContext` (`SslCertFile` / `SslPrivKeyFile` / `SslCAFile` / `SslVerifyPeer`).
+`TSslContext` (`SslCertFile` / `SslPrivKeyFile` / `SslCAFile` / `SslVerifyPeer`
+/ `SslVerifyPeerModes`).
 
 > The `POST /echo` body is sent with `Content-Length` (not chunked) because ICS
 > rejects a request body without `Content-Length` before the handler runs.
