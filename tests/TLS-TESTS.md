@@ -88,6 +88,7 @@ HorseICSTLSTestClient mtls       # terminal 2  → T3, T4 pass
 |---|---|---|
 | one-way | T1 `GET /ping` → 200 "pong" | TLS handshake + HTTPS round-trip (TSslHttpServer) |
 | one-way | T2 `POST /echo` → body echoed | request body survives the TLS path |
+| one-way | T5 `PUT /nobody` with **no** `Content-Length` → 200 | the lenient `THorseICSConnection` is installed on the **TLS** server (FIX-ICS-SSLCONN-1) |
 | mTLS | T3 `GET /ping` **with** client cert → 200 | `SslVerifyPeer` accepts a CA-signed client cert |
 | mTLS | T4 `GET /ping` **without** client cert → rejected | `SSL_VERIFY_PEER \| FAIL_IF_NO_PEER_CERT` enforced — **true only since FIX-ICS-MTLS-1** |
 
@@ -107,6 +108,31 @@ HorseICSTLSTestClient mtls       # terminal 2  → T3, T4 pass
 > handshakes and still honours a valid certificate. **Only the negative case
 > could detect this**, which is why it is worth keeping even though "not 200" is
 > a weak assertion on its own.
+
+> **T5 (FIX-ICS-SSLCONN-1).** `ClientClass := THorseICSConnection` was assigned
+> only on the plain-HTTP branch, so over TLS the provider ran ICS's stock
+> connection and lost two behaviours at once. `TCrossHttpClient` omits
+> `Content-Length` entirely for an empty body, so a body-less PUT reaches ICS's
+> reject path and answers 400 before the handler — that is what T5 detects, and
+> it was verified by running the test against the unfixed provider (400, ICS's
+> own error page) and then against the fixed one (`put-ok`), with nothing else
+> changed.
+>
+> The second lost behaviour has no direct test and is the more serious of the
+> two: `ExecutePending` guards the async marshal-back with
+> `Conn is THorseICSConnection`, which was **always False over TLS**, leaving
+> keep-alive enabled on exactly the path that needs it off — ICS can begin
+> reading the next request before the deferred answer is written, desyncing
+> request/response pairing on a reused HTTPS connection. A direct test would be
+> timing-dependent and would pass intermittently while broken, which is worse
+> than none; T5 shares its single root cause and stands as the proxy.
+>
+> The comment that had justified leaving this alone claimed the SSL server needs
+> a `TSslHttpConnection`-derived class. **No such type exists in ICS.**
+> `OverbyteIcsHttpSrv` declares `TBaseHttpConnection` conditionally — as
+> `TSslWSocketClient` in an SSL build, `TWSocketClient` otherwise — so the one
+> `THttpConnection` is already SSL-capable and `TSslHttpServer` inherits
+> `ClientClass` like any other `THttpServer`.
 
 ## Provider config exercised
 

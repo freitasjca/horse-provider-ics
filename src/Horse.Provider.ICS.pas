@@ -478,15 +478,36 @@ begin
     FServer := LSslSrv;
   end
   else
-  begin
     FServer := THttpServer.Create(nil);
-    // Lenient connection class so body-less PUT/PATCH (no Content-Length) fire
-    // OnPut/PatchDocument instead of ICS's default 400 + connection close.
-    // THorseICSConnection derives from THttpConnection (non-SSL). The SSL server
-    // uses TSslHttpConnection; a TSslHttpConnection-derived equivalent is a
-    // follow-up (SSL is not exercised by the current test suite).
-    FServer.ClientClass := THorseICSConnection;
-  end;
+
+  // [FIX-ICS-SSLCONN-1] Applies to BOTH server shapes. It used to be set only
+  // on the plain branch, on the belief that "the SSL server uses
+  // TSslHttpConnection" and needed a parallel class. No such type exists in ICS.
+  // There is ONE connection class, and it is already SSL-capable:
+  // OverbyteIcsHttpSrv declares TBaseHttpConnection conditionally as
+  // TSslWSocketClient in an SSL build and TWSocketClient otherwise, with
+  // THttpConnection descending from it either way. TSslHttpServer inherits
+  // ClientClass like any other THttpServer.
+  //
+  // Two behaviours were therefore missing over HTTPS, both silently:
+  //
+  //  1. Body-less PUT/PATCH. ICS's ProcessPostPutPat answers 400 and closes
+  //     BEFORE OnPut/PatchDocument fires when there is no Content-Length; the
+  //     overrides below treat it as a zero-length body. Over TLS the handler
+  //     never ran, so HTTPS and HTTP disagreed on a valid RFC 7230 request.
+  //
+  //  2. DisableKeepAlive — the more serious one. ExecutePending does
+  //     `if APending.Conn is THorseICSConnection then ...DisableKeepAlive`,
+  //     which was always False over TLS because the connection was a stock
+  //     THttpConnection. That left keep-alive ON for the async marshal-back
+  //     path, whose whole reason for closing the connection is that ICS may
+  //     start reading the NEXT request before our deferred answer is written —
+  //     desyncing request/response pairing on a reused connection.
+  //
+  // Note the call site keys on OUR subclass, so assigning it here is what makes
+  // that guard reachable at all; any future third server shape must come
+  // through this same assignment or it silently loses both behaviours again.
+  FServer.ClientClass := THorseICSConnection;
 
   FServer.Port             := IntToStr(APort);
   // '0.0.0.0' = all interfaces. FHost is set by the Listen overload family;

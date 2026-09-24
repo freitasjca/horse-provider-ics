@@ -83,6 +83,19 @@ begin
     begin
       Res.Send(Req.Body).Status(THTTPStatus.OK);
     end);
+
+  // [FIX-ICS-SSLCONN-1] A body-less PUT is valid (RFC 7230), but ICS answers
+  // 400 and closes before OnPutDocument fires unless the provider's lenient
+  // THorseICSConnection is installed as ClientClass. That assignment used to
+  // happen only on the plain-HTTP branch, so over TLS this handler never ran —
+  // and the same omission also disabled the keep-alive guard that keeps an
+  // async response paired with its own request. Reaching this route over HTTPS
+  // is the deterministic proof the connection class is installed.
+  THorse.Put('/nobody',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      Res.Send('put-ok').Status(THTTPStatus.OK);
+    end);
 end;
 
 var

@@ -171,6 +171,24 @@ begin
     Check('T2  POST /echo over https → body echoed',
       (not R.TimedOut) and (R.StatusCode = 200) and (R.Body = 'hello-tls'),
       Format('status=%d body=%s', [R.StatusCode, R.Body]));
+
+    // [FIX-ICS-SSLCONN-1] An empty body makes TCrossHttpClient omit
+    // Content-Length entirely (_CreateRequestHeader only emits it when
+    // ABodySize > 0), which is exactly the case ICS rejects with 400 before the
+    // handler runs. Reaching the route proves the provider installed its
+    // lenient THorseICSConnection on the TLS server — which it did not do until
+    // 2026-09-24, because ClientClass was assigned only on the plain-HTTP
+    // branch. A 400 here means that assignment is missing again.
+    //
+    // This also covers, indirectly, the more serious half of that omission: the
+    // keep-alive guard in ExecutePending tests `Conn is THorseICSConnection`,
+    // so it is unreachable whenever this assertion fails.
+    R := DoSync(LClient, 'PUT', BASE_URL + '/nobody', '');
+    Check('T5  PUT /nobody (no Content-Length) over https → handler ran',
+      (not R.TimedOut) and (R.StatusCode = 200) and (R.Body = 'put-ok'),
+      Format('status=%d body=%s  (400 = ICS rejected it before the handler; ' +
+             'ClientClass not installed on the TLS server)',
+             [R.StatusCode, R.Body]));
   finally
     LClient.Free;
   end;
