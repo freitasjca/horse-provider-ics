@@ -212,6 +212,13 @@ type
 
   public
     class procedure StopListen; override;
+
+    // [FIX-ICS-GRACEFUL-1] The override AGENTS.md makes mandatory for any
+    // provider owning the TCP socket. Without it this provider inherited
+    // THorseProviderAbstract's version, which discards ATimeoutMS and calls
+    // StopListen -> Stop, which stops the server and ends the message pump
+    // BEFORE draining.
+    class procedure StopListenGraceful(const ATimeoutMS: Integer = 5000); override;
     class procedure Listen; overload; override;
     // Listen overload family — signatures mirror the Console provider.
     // Required since the 2026-07 upstream sync: Horse.Instance
@@ -223,6 +230,8 @@ type
     class procedure ListenWithConfig(const APort: Integer;
       const AConfig: THorseICSConfig); reintroduce;
     class procedure Stop;
+    // [FIX-ICS-GRACEFUL-1] shared teardown tail — see the implementation.
+    class procedure StopTeardown;
 
     class property Port:   Integer          read GetPort write SetPort;
     class property Config: THorseICSConfig  read FConfig;
@@ -235,6 +244,39 @@ uses
   Horse.Commons,
   Horse.Constants,
   Horse.Exception.Interrupted;
+
+var
+  // [FIX-ICS-GRACEFUL-1] Optional extra settle, DEFAULT 0. The drain below waits
+  // on COUNTERS rather than a clock, so this should not be needed; it exists to
+  // characterise a residual gap without a rebuild. HORSE_ICS_SETTLE_MS.
+  GICSSettleMs: Integer = -1;
+
+function ICSSettleMs: Integer;
+var
+  LRaw: string;
+begin
+  if GICSSettleMs < 0 then
+  begin
+    LRaw := GetEnvironmentVariable('HORSE_ICS_SETTLE_MS');
+    if (LRaw = '') or not TryStrToInt(Trim(LRaw), GICSSettleMs) or (GICSSettleMs < 0) then
+      GICSSettleMs := 0;
+  end;
+  Result := GICSSettleMs;
+end;
+
+// Milliseconds left before ADeadline, 0 once passed. The Integer cast is what
+// makes this correct across GetTickCount's 49-day wraparound.
+function ICSRemainingMs(const ADeadline: Cardinal): Cardinal;
+var
+  LLeft: Integer;
+begin
+  LLeft := Integer(ADeadline - TThread.GetTickCount);
+  if LLeft > 0 then
+    Result := Cardinal(LLeft)
+  else
+    Result := 0;
+end;
+
 
 const
   // Reserved by AllocateMsgHandler at runtime.
@@ -564,10 +606,128 @@ begin
   DoOnStopListen;
 end;
 
+// ── StopListenGraceful — [FIX-ICS-GRACEFUL-1] ────────────────────────────────
+// Stop's ordering is the defect, as on the other two providers: it calls
+// FServer.Stop and sets FServer.Terminated := True and only THEN waits on the
+// drain event. On ICS that is especially costly, because Terminated ends
+// FServer.MessageLoop — and the message pump is how ICS writes anything at all.
+//
+// Measured baseline 2026-09-27 (and 5/5 on 2026-09-24): the call returns in
+// ~712 ms for 700 ms of remaining work, so teardown already waits for the
+// handler — but the client loses its reply at ~807 ms, the instant shutdown
+// begins. That is CrossSocket's signature, not mORMot's (~5012 ms, when the
+// handler finished), which is what this ordering predicts.
+//
+// TWO queues sit between a finished handler and the socket, and both must be
+// empty before the pump may be stopped:
+//
+//   FActiveRequests   worker-pool tasks still inside ExecutePipeline
+//   FPendingMap       responses PostMessage'd to the receiver but not yet
+//                     processed by the main-thread pump
+//   FPostBuffers      responses being written, with partial sends tracked
+//
+// So FActiveRequests = 0 does NOT mean the reply is on the wire — the same gap
+// CrossSocket covers with a 100 ms sleep, except here it is COUNTABLE and the
+// counts are guarded by FPendingLock. This waits on the counts, which is a
+// measurement rather than a hope, and the whole drain shares ONE deadline so the
+// caller's timeout bounds the total rather than being spent twice.
+//
+// [FIX-ICS-GRACEFUL-2] The accept-during-drain gap is CLOSED, and step 0 below
+// says how. It was previously recorded as unknown because icsv97 was thought to be
+// unreadable from the devcontainer; it is readable, and THttpServer.Stop's own two
+// lines answer the question outright. So ICS performs all three steps the
+// framework asks for: stop accepting, drain, tear down.
+class procedure THorseProviderICS.StopListenGraceful(const ATimeoutMS: Integer);
+var
+  LTimeout:  Integer;
+  LDeadline: Cardinal;
+  LPending:  Integer;
+  LPosting:  Integer;
+begin
+  TriggerBeforeStop;
+  SetIsShuttingDown(True);
+  try
+    LTimeout := ATimeoutMS;
+    if LTimeout <= 0 then
+      LTimeout := FConfig.DrainTimeoutMs;
+    LDeadline := TThread.GetTickCount + Cardinal(LTimeout);
+
+    FRunning := False;
+
+    // 0. [FIX-ICS-GRACEFUL-2] STOP ACCEPTING, without touching live clients.
+    //    THttpServer.Stop is two separable steps:
+    //
+    //        FWSocketServer.MultiClose;     { closes the LISTENERS }
+    //        FWSocketServer.DisconnectAll;  { drops the CLIENTS }
+    //
+    //    so calling MultiClose alone stops new connections while every
+    //    established client keeps its socket. This is ICS's OWN idiom, not an
+    //    invention: THttpServer.SetPortValue does exactly this to rebind a port,
+    //    under the comment "Do not disconnect already connected clients."
+    //    MultiClose closes the main listening socket and every extra listener
+    //    (MlClose per entry) and is a no-op on anything already closed, so the
+    //    FServer.Stop below can still run unchanged.
+    //
+    //    CAUTION, and the reason this is a separate fix number: on CrossSocket
+    //    the equivalent step — CloseAllListens — DESTROYED the in-flight response
+    //    body while the headers still went out, for reasons never explained (see
+    //    FIX-CS-GRACEFUL-1). There is no reason to expect ICS to behave that way,
+    //    but "no reason to expect" is not evidence, and the probe's G1 assertion
+    //    is the detector: it checks the BODY, not the status. If G1 regresses,
+    //    delete this step and ICS goes back to accepting during its drain.
+    if Assigned(FServer) and Assigned(FServer.WSocketServer) then
+      FServer.WSocketServer.MultiClose;
+
+    // 1. Drain the worker pool while the pump is STILL RUNNING on the main
+    //    thread, so in-flight responses can still be written.
+    if TInterlocked.CompareExchange(FActiveRequests, 0, 0) > 0 then
+      if Assigned(FDrainEvent) then
+        FDrainEvent.WaitFor(ICSRemainingMs(LDeadline));
+
+    // 2. Drain the marshalling queues on their counts, same deadline.
+    while ICSRemainingMs(LDeadline) > 0 do
+    begin
+      LPending := 0;
+      LPosting := 0;
+      if Assigned(FPendingLock) then
+      begin
+        FPendingLock.Acquire;
+        try
+          if Assigned(FPendingMap) then
+            LPending := FPendingMap.Count;
+          if Assigned(FPostBuffers) then
+            LPosting := FPostBuffers.Count;
+        finally
+          FPendingLock.Release;
+        end;
+      end;
+      if (LPending = 0) and (LPosting = 0) then
+        Break;
+      Sleep(10);
+    end;
+
+    if ICSSettleMs > 0 then
+      Sleep(ICSSettleMs);
+
+    // 3. Only now stop accepting and end the pump. From here down this is
+    //    byte-for-byte what Stop does, so the two paths cannot diverge.
+    if Assigned(FServer) then
+    begin
+      FServer.Stop;
+      FServer.Terminated := True;
+    end;
+
+    StopTeardown;
+
+    DoOnStopListen;
+  finally
+    SetIsShuttingDown(False);
+  end;
+end;
+
 class procedure THorseProviderICS.Stop;
 var
   LStarted: Cardinal;
-  Entry:    TICSPendingRequest;
 begin
   FRunning := False;
 
@@ -582,6 +742,16 @@ begin
   if (LStarted > 0) and Assigned(FDrainEvent) then
     FDrainEvent.WaitFor(FConfig.DrainTimeoutMs);
 
+  StopTeardown;
+end;
+
+// [FIX-ICS-GRACEFUL-1] The teardown tail, factored out of Stop so Stop and
+// StopListenGraceful cannot drift apart. Unchanged from what Stop always did;
+// only its position relative to the drain differs between the two callers.
+class procedure THorseProviderICS.StopTeardown;
+var
+  Entry: TICSPendingRequest;
+begin
   THorseICSWorkerPool.Finalize;
 
   FreeAndNil(FReceiver);
