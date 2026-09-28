@@ -158,6 +158,7 @@ providers feature-for-feature:
 | `application/x-www-form-urlencoded` → `Req.ContentFields` | parsed inline in `Populate` |
 | `Req.RawWebRequest` / `Res.RawWebResponse` (Horse.CORS etc.) | hybrid adapters (PATCH-REQ-8 / PATCH-RES-6) |
 | **TLS 1.3 + mTLS** | `TSslContext` + `TSslHttpServer` (`THorseICSConfig` SSL fields) |
+| **Graceful shutdown drain** (all three steps) | counts-based drain + `MultiClose` to stop accepting (FIX-ICS-GRACEFUL-1/2) — see [Graceful shutdown](#graceful-shutdown) |
 
 Verified by the `tests/` A–K suite (`HorseICSParamTestServer` + `Client`, Delphi,
 port 9110) — the same matrix the CrossSocket / mORMot suites run, including
@@ -168,6 +169,74 @@ TLS itself — ICS's distinctive value — has a dedicated test:
 one-way HTTPS and mutual TLS against a self-signed fixture PKI in `tests/certs/`.
 Pass `mtls` to both to exercise client-certificate verification. Runbook:
 [`tests/TLS-TESTS.md`](tests/TLS-TESTS.md).
+
+## Graceful shutdown
+
+`StopListenGraceful(ATimeoutMS)` stops accepting new connections, waits for requests
+already in flight to finish, and **delivers their responses** before tearing the server
+down. It is not the same call as `StopListen`, which is abrupt and unchanged.
+
+```pascal
+THorse.StopListenGraceful(5000);   // wait up to 5 s for in-flight work
+```
+
+Implemented in **provider v1.0.8** (FIX-ICS-GRACEFUL-1 and -2). Measured: 703-720 ms for
+700 ms of remaining work.
+
+**This is the only external Horse provider that performs all three steps the framework
+asks for** — stop accepting, drain, tear down — and its drain is the most precise of the
+three, for a reason specific to ICS.
+
+### The drain waits on counts, not a clock
+
+Three things sit between a finished handler and the socket:
+
+| | |
+|---|---|
+| `FActiveRequests` | worker tasks still inside the pipeline |
+| `FPendingMap` | responses `PostMessage`'d to the receiver, pump has not run yet |
+| `FPostBuffers` | responses mid-write, partial sends tracked |
+
+A finished ICS worker has only *posted* its response — the socket write happens on the
+**main thread**, when the message pump processes that message. So `FActiveRequests = 0`
+does **not** mean the reply is out.
+
+Other transports cover that window with a fixed sleep. Here it is countable, and
+`FPendingLock` already guards both dictionaries, so the drain waits on the actual counts
+under one shared deadline — your timeout bounds the total rather than being spent twice.
+**No settle delay at all.** `HORSE_ICS_SETTLE_MS` exists for characterisation and is not
+needed.
+
+### Stopping accepts without dropping live clients
+
+`THttpServer.Stop` is two separable calls: `FWSocketServer.MultiClose` closes the
+**listeners**, `DisconnectAll` drops the **clients**. Using `MultiClose` alone halts new
+connections while established clients keep their sockets.
+
+This is ICS's own idiom, not an invention — `THttpServer.SetPortValue` does exactly this
+to rebind a port, under the comment *"Do not disconnect already connected clients."* It
+was measured rather than assumed, because the equivalent step on Delphi-Cross-Socket
+destroys the in-flight response body. Elapsed did not move, so it costs nothing.
+
+### What was wrong before v1.0.8
+
+The provider had no override, so it inherited Horse's abstract base, which **discards the
+timeout**. `Stop` also had the ordering inverted — `FServer.Stop` and
+`Terminated := True` first, drain wait after — which on ICS is doubly costly, because
+`Terminated` ends `FServer.MessageLoop` and that loop is how ICS writes anything at all.
+Teardown already waited for the handler, but the client lost its reply the instant
+shutdown began.
+
+`Stop`'s teardown tail is now factored into a shared `StopTeardown`, so the graceful and
+abrupt paths cannot drift apart.
+
+> **Requires Horse >= 3.3.10.** On earlier releases `THorseInstance.StopListenGraceful`
+> called its own `StopListen` and bypassed every provider override, so this works only
+> when called directly on `THorseProviderICS` — through `THorse` it is silently inert,
+> with no error. Fixed upstream in
+> [HashLoad/horse#590](https://github.com/HashLoad/horse/pull/590), released in 3.3.10.
+
+---
 
 ## Known limitations
 
@@ -183,10 +252,12 @@ can, but a few user-visible constraints remain (full detail in
   response design would otherwise desync request/response pairing on a reused
   connection. A throughput trade-off, not a correctness one; a future
   per-connection-serialisation refactor can restore keep-alive.
-- **Body-less PUT/PATCH over TLS** would `400`. The custom connection class that
-  makes ICS accept a body-less PUT/PATCH (no `Content-Length`) is installed on the
-  plain `THttpServer` only; the SSL server (`TSslHttpConnection`) needs an
-  analogous class. Body-less PUT/PATCH over plain HTTP work.
+> **Resolved in v1.0.7 (SSLCONN-1):** body-less PUT/PATCH over TLS used to `400`,
+> because `ClientClass` was assigned only on the plain branch. `FServer.ClientClass`
+> is now set unconditionally — `TSslHttpServer` inherits it like any other
+> `THttpServer` — so body-less PUT/PATCH and the keep-alive desync guard both work
+> over HTTPS. The comment that deferred this named `TSslHttpConnection`, **a type ICS
+> does not have**, which is why it read as blocked on work that did not exist.
 
 ## Repo layout
 
@@ -217,7 +288,7 @@ tests/
 
 ## Dependencies
 
-- [`HashLoad/horse`](https://github.com/HashLoad/horse) >= 3.3.0 — first official release with `IHorseRawRequest` / `IHorseRawResponse`, `HORSE_PROVIDER_*` define normalization, and `Res.Cookie(...)` (RFC 6265 typed-cookie API in `Horse.Core.Cookie`). The `freitasjca/horse` fork is retired.
+- [`HashLoad/horse`](https://github.com/HashLoad/horse) >= 3.3.10 — 3.3.0 was the first official release with `IHorseRawRequest` / `IHorseRawResponse`, `HORSE_PROVIDER_*` define normalization, and `Res.Cookie(...)` (RFC 6265 typed-cookie API in `Horse.Core.Cookie`). The floor is **3.3.10 from provider v1.0.8**, because `StopListenGraceful` is silently inert through `THorse` on anything earlier — see [Graceful shutdown](#graceful-shutdown). The `freitasjca/horse` fork is retired.
 - [OverbyteICS v9.7](https://wiki.overbyte.eu/wiki/index.php/ICS_Download) (`icsv97/Source` added to the project search path; multipart decoding uses ICS's own `OverbyteIcsFormDataDecoder`)
 
 ICS is not Boss-installable — same situation as mORMot. Add `icsv97/Source` to the project's library path manually.
