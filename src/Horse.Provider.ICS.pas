@@ -242,7 +242,8 @@ uses
   Horse.Commons,
   Horse.Constants,
   Horse.Exception.Interrupted,
-  OverbyteIcsSSLEAY;   { [FIX-ICS-MINVER-1] TLS1_x_VERSION, SSL_CTX_get_min_proto_version }
+  OverbyteIcsSSLEAY,   { [FIX-ICS-MINVER-1] TLS1_x_VERSION, SSL_CTX_get_min_proto_version }
+  OverbyteIcsLIBEAY;   { [ICS-TLS13-SUITES-1] OPENSSL_sk_num / OPENSSL_sk_value }
 
 var
   // [FIX-ICS-GRACEFUL-1] Optional extra settle, DEFAULT 0. The drain below waits
@@ -261,6 +262,84 @@ begin
       GICSSettleMs := 0;
   end;
   Result := GICSSettleMs;
+end;
+
+// [ICS-TLS13-SUITES-1] The cipher names an OpenSSL context actually kept,
+// TLS 1.3 suites included. Read through a throwaway SSL object because this
+// ICS binds SSL_get_ciphers but not SSL_CTX_get_ciphers; SSL_new copies the
+// context's list, so the two are the same list. The stack belongs to the SSL
+// object and is released with it - it is not freed here.
+function ICSEffectiveCipherNames(const ACtx: PSSL_CTX): TArray<string>;
+var
+  LSsl:   PSSL;
+  LStack: PSTACK_OF_SSL_CIPHER;
+  LName:  PAnsiChar;
+  LCount: Integer;
+  I:      Integer;
+begin
+  Result := nil;
+  if not (Assigned(SSL_new) and Assigned(SSL_free) and Assigned(SSL_get_ciphers) and
+    Assigned(SSL_CIPHER_get_name) and Assigned(OPENSSL_sk_num) and
+    Assigned(OPENSSL_sk_value)) then
+    raise EHorseException.New.Error(
+      'HORSE_PROVIDER_ICS: cannot verify SSLCipherSuitesTLS13 - the OpenSSL ' +
+      'cipher-list functions are not loaded. Refusing to serve with a cipher ' +
+      'configuration that cannot be checked.');
+  LSsl := SSL_new(ACtx);
+  if LSsl = nil then
+    raise EHorseException.New.Error(
+      'HORSE_PROVIDER_ICS: cannot verify SSLCipherSuitesTLS13 - SSL_new failed ' +
+      'on the configured context.');
+  try
+    LStack := SSL_get_ciphers(LSsl);
+    if LStack = nil then
+      Exit;
+    LCount := OPENSSL_sk_num(LStack);
+    SetLength(Result, LCount);
+    for I := 0 to LCount - 1 do
+    begin
+      LName := SSL_CIPHER_get_name(OPENSSL_sk_value(LStack, I));
+      if LName <> nil then
+        Result[I] := string(AnsiString(LName));
+    end;
+  finally
+    SSL_free(LSsl);
+  end;
+end;
+
+// Every name in ARequested (colon-separated; blanks around a name ignored)
+// that is absent from AKept, comma-joined; '' when all were kept. Exact,
+// case-sensitive comparison: OpenSSL suite names are exact, and a
+// differently-cased name is one OpenSSL dropped.
+function ICSMissingSuiteNames(const ARequested: string;
+  const AKept: TArray<string>): string;
+var
+  LParts: TArray<string>;
+  LName:  string;
+  LFound: Boolean;
+  I, J:   Integer;
+begin
+  Result := '';
+  LParts := ARequested.Split([':']);
+  for I := 0 to High(LParts) do
+  begin
+    LName := Trim(LParts[I]);
+    if LName = '' then
+      Continue;
+    LFound := False;
+    for J := 0 to High(AKept) do
+      if AKept[J] = LName then
+      begin
+        LFound := True;
+        Break;
+      end;
+    if not LFound then
+    begin
+      if Result <> '' then
+        Result := Result + ', ';
+      Result := Result + LName;
+    end;
+  end;
 end;
 
 // Milliseconds left before ADeadline, 0 once passed. The Integer cast is what
@@ -446,6 +525,7 @@ var
   LSslSrv:  TSslHttpServer;
   LWantMin: Integer;
   LGotMin:  Integer;
+  LMissing: string;
 begin
   // [SEC-32]
   if Assigned(FServer) then
@@ -511,8 +591,13 @@ begin
       icsSslTLS12: FSslContext.SslMinVersion := sslVerTLS1_2;
       icsSslTLS13: FSslContext.SslMinVersion := sslVerTLS1_3;
     end;
+    // SSLCipherList reaches SSL_CTX_set_cipher_list only, which never touches
+    // TLS 1.3. TLS 1.3 suites are ICS's SslCipherList13, applied by InitContext
+    // with SSL_CTX_set_ciphersuites. Empty leaves ICS's own default list.
     if AConfig.SSLCipherList <> '' then
       FSslContext.SslCipherList  := AConfig.SSLCipherList;
+    if AConfig.SSLCipherSuitesTLS13 <> '' then
+      FSslContext.SslCipherList13 := AConfig.SSLCipherSuitesTLS13;
 
     // Build the OpenSSL context NOW instead of at the first TLS client, where
     // ICS does it lazily (OverbyteIcsWSocket: `if SslCtxPtr = nil then
@@ -537,6 +622,21 @@ begin
             'protocol of $%.4x, but the OpenSSL context reports $%.4x after ' +
             'InitContext. Refusing to serve with a weaker minimum than ' +
             'configured.', [LWantMin, LGotMin]));
+      end;
+      // [ICS-TLS13-SUITES-1] InitContext raises only when NO requested suite
+      // is valid. A misspelled or wrongly cased name beside a valid one is
+      // dropped silently, and the server would run on fewer suites than
+      // configured. Read the list back and refuse, naming what was dropped.
+      if AConfig.SSLCipherSuitesTLS13 <> '' then
+      begin
+        LMissing := ICSMissingSuiteNames(AConfig.SSLCipherSuitesTLS13,
+          ICSEffectiveCipherNames(FSslContext.SslCtxPtr));
+        if LMissing <> '' then
+          raise EHorseException.New.Error(Format(
+            'HORSE_PROVIDER_ICS: SSLCipherSuitesTLS13 names TLS 1.3 suite(s) ' +
+            'OpenSSL did not accept: %s. Names are exact and case-sensitive ' +
+            '(e.g. TLS_AES_256_GCM_SHA384). Refusing to serve with fewer ' +
+            'suites than configured.', [LMissing]));
       end;
     except
       FreeAndNil(FSslContext);

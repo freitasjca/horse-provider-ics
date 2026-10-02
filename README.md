@@ -80,6 +80,8 @@ begin
   Cfg.SSLCertFile      := 'server.pem';
   Cfg.SSLPrivKeyFile   := 'server.key';
   Cfg.SSLVersionMethod := icsSslTLS13;     // TLS 1.3 minimum = TLS 1.3 only
+  Cfg.SSLCipherSuitesTLS13 :=              // optional; empty = ICS default
+    'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256';
 
   // Mutual TLS — require + verify client certificates
   Cfg.SSLCAFile        := 'ca.pem';
@@ -90,6 +92,15 @@ end.
 ```
 
 `SSLVersionMethod` is a **minimum**: `icsSslTLS12` still allows TLS 1.3, and `icsSslTLS13` refuses TLS 1.2 clients. It is enforced, and read back from the OpenSSL context at `Listen`, **since v1.0.9 (FIX-ICS-MINVER-1)**. Before that it was written to an ICS property that ICS ignores, so **no value had any effect**: `icsSslTLS13` served TLS 1.2 clients. Since v1.0.9 the TLS context is also built at `Listen`, so a bad certificate or key fails there, not at the first handshake.
+
+OpenSSL configures cipher choice in **two separate places**, and so does this provider:
+
+| Field | OpenSSL call | Applies to | Syntax |
+|---|---|---|---|
+| `SSLCipherList` | `SSL_CTX_set_cipher_list` | TLS 1.2 and below **only** | rule string: `ECDHE+AESGCM:!aNULL` |
+| `SSLCipherSuitesTLS13` (v1.0.10) | `SSL_CTX_set_ciphersuites` | TLS 1.3 | exact, case-sensitive names: `TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256` |
+
+`SSLCipherList` never restricts TLS 1.3, the protocol most OpenSSL 3.x clients negotiate. Empty leaves ICS's default for either field. OpenSSL **silently drops** a misspelled TLS 1.3 name that sits beside a valid one, so `Listen` reads the effective list back and raises, naming every suite that was dropped, rather than serving on fewer suites than configured.
 
 ## Architecture
 

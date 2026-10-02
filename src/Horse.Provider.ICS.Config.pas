@@ -111,8 +111,21 @@ type
     // verified at Listen since v1.0.9; ignored before.
     SSLVersionMethod: TICSSslMinVersion;
 
-    // OpenSSL cipher list (empty → ICS default — sane modern ciphers).
+    // TLS 1.2-and-below cipher RULES in OpenSSL syntax (SSL_CTX_set_cipher_list),
+    // e.g. 'ECDHE+AESGCM:!aNULL'. Empty = ICS default. Does NOT affect TLS 1.3,
+    // which OpenSSL configures separately - use SSLCipherSuitesTLS13 for that.
+    // An @SECLEVEL=n here does set the context-wide security level, which TLS
+    // 1.3 handshakes also obey.
     SSLCipherList:   string;
+
+    // TLS 1.3 cipher SUITES (SSL_CTX_set_ciphersuites): exact, case-sensitive
+    // names, colon-separated, in priority order, e.g.
+    // 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256'. Empty = ICS's
+    // default (sslCipherSuitesTLS13: AES-256-GCM, CHACHA20, AES-128-GCM).
+    // OpenSSL silently DROPS a misspelled name that sits beside a valid one,
+    // so Listen reads the effective list back and raises, naming every
+    // requested suite OpenSSL did not keep (ICS-TLS13-SUITES-1, v1.0.10).
+    SSLCipherSuitesTLS13: string;
 
     class function Default: THorseICSConfig; static;
   end;
@@ -137,6 +150,7 @@ begin
   Result.SSLVerifyPeer     := False;
   Result.SSLVersionMethod  := icsSslBest;
   Result.SSLCipherList     := '';
+  Result.SSLCipherSuitesTLS13 := '';
 end;
 
 end.

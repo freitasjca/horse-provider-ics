@@ -126,6 +126,19 @@ begin
     else if SameText(ParamStr(1), 'minver12') then
       Config.SSLVersionMethod := icsSslTLS12;
 
+    // [ICS-TLS13-SUITES-1] run-tls-tests.bat pass 4. `suites13` restricts TLS
+    // 1.3 to CHACHA20 alone. `suites13typo` misspells a name beside a valid
+    // one (SHA348): OpenSSL keeps the valid one and drops the typo silently,
+    // so Listen must refuse and name it. `suites13bad` has no valid name at
+    // all, which ICS's own InitContext already rejects.
+    if SameText(ParamStr(1), 'suites13') then
+      Config.SSLCipherSuitesTLS13 := 'TLS_CHACHA20_POLY1305_SHA256'
+    else if SameText(ParamStr(1), 'suites13typo') then
+      Config.SSLCipherSuitesTLS13 :=
+        'TLS_AES_256_GCM_SHA348:TLS_CHACHA20_POLY1305_SHA256'
+    else if SameText(ParamStr(1), 'suites13bad') then
+      Config.SSLCipherSuitesTLS13 := 'TLS_NOT_A_SUITE';
+
     RegisterRoutes;
 
     Writeln(Format('[ICSTLSTest] certs: %s', [CertDir]));

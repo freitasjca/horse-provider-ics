@@ -11,6 +11,9 @@ REM    3. minimum TLS version (FIX-ICS-MINVER-1) -> M0..M4. SSLVersionMethod
 REM       was written to an ICS property ICS ignores, so "TLS 1.3 only"
 REM       served TLS 1.2. Needs openssl.exe on PATH; without it the pass is
 REM       VOID (loud), never a pass.
+REM    4. TLS 1.3 cipher suites (ICS-TLS13-SUITES-1) -> C0..C5. Same openssl
+REM       peer and the same VOID rule. A misspelled suite beside a valid one
+REM       is silently dropped by OpenSSL, so the server must refuse to start.
 REM
 REM  Usage:  run-tls-tests.bat        (build first with build-tls-dcc.bat)
 REM  Exit code: 0 = all passed, N = N failed assertions, 2 = VOID (nothing ran).
@@ -88,12 +91,14 @@ call :runpass "mtls" "mutual TLS" mtls
 set /a TOTAL+=%ERRORLEVEL%
 call :runminver
 set /a TOTAL+=%ERRORLEVEL%
+call :runsuites
+set /a TOTAL+=%ERRORLEVEL%
 
 echo.
 echo ===========================================================================
 if "%VOIDED%"=="1" goto :report_void
 if not "%TOTAL%"=="0" goto :report_fail
-echo  ALL PASSED - one-way TLS, mutual TLS and minimum TLS version.
+echo  ALL PASSED - one-way TLS, mutual TLS, minimum TLS version, TLS 1.3 suites.
 echo ===========================================================================
 exit /b 0
 :report_fail
@@ -268,6 +273,107 @@ echo    PASS  %~4
 exit /b 0
 :mv_expect_bad
 echo    FAIL  %~4  [s_client exit !MVRC!; see %BIN%\minver-s_client.log]
+set /a MVFAIL+=1
+exit /b 0
+
+REM ---------------------------------------------------------------------------
+REM Pass 4 - TLS 1.3 cipher suites (ICS-TLS13-SUITES-1). SSLCipherList reaches
+REM only SSL_CTX_set_cipher_list, which never touches TLS 1.3; the new field
+REM SSLCipherSuitesTLS13 reaches SSL_CTX_set_ciphersuites. Judged the same way
+REM as pass 3: s_client exit code plus its "Cipher is <suite>" line. Control
+REM first: the default server must serve the AES-128-GCM client that the
+REM restricted server must refuse. C3 checks that restricting TLS 1.3 left
+REM TLS 1.2 alone. C4/C5 are startup refusals: a server that comes up is the
+REM defect (a dropped suite, served silently), and the refusal must name the
+REM suite, or it is a FAIL as well.
+:runsuites
+echo.
+echo ===========================================================================
+echo  TLS pass: TLS 1.3 cipher suites  (openssl s_client peer)
+echo ===========================================================================
+set "OPENSSL="
+for /f "delims=" %%I in ('where openssl.exe 2^>nul') do if not defined OPENSSL set "OPENSSL=%%I"
+if not defined OPENSSL goto :cs_noopenssl
+set /a MVFAIL=0
+
+call :mv_server "" control13
+if "!SRVPID!"=="" goto :cs_end
+call :cs_expect "-tls1_3 -ciphersuites TLS_AES_128_GCM_SHA256" ok "Cipher is TLS_AES_128_GCM_SHA256" "C0 control: default server serves a TLS 1.3 AES-128-GCM client"
+call :mv_stop
+
+call :mv_server "suites13" suites13
+if "!SRVPID!"=="" goto :cs_end
+call :cs_expect "-tls1_3 -ciphersuites TLS_CHACHA20_POLY1305_SHA256" ok "Cipher is TLS_CHACHA20_POLY1305_SHA256" "C1 suites13: the configured suite is negotiated"
+call :cs_expect "-tls1_3 -ciphersuites TLS_AES_128_GCM_SHA256" refused "" "C2 suites13: an excluded suite is REFUSED"
+call :cs_expect "-tls1_2" ok "New, TLSv1.2" "C3 suites13: TLS 1.2 is untouched by the TLS 1.3 setting"
+call :mv_stop
+
+call :cs_refusal "suites13typo" suites13typo "TLS_AES_256_GCM_SHA348" "C4 a misspelled suite beside a valid one: Listen refuses, naming it"
+call :cs_refusal "suites13bad" suites13bad "Fatal:" "C5 no valid suite at all: Listen refuses"
+
+:cs_end
+exit /b !MVFAIL!
+
+:cs_noopenssl
+echo    [VOID] openssl.exe is not on PATH - TLS 1.3 suites were NOT
+echo           exercised. Add an OpenSSL bin directory to PATH and re-run.
+set "VOIDED=1"
+exit /b 0
+
+REM cs_expect <s_client args> <ok|refused> <line expected when ok> <label>
+:cs_expect
+"!OPENSSL!" s_client -connect 127.0.0.1:%TLS_PORT% %~1 < nul > "%BIN%\suites-s_client.log" 2>&1
+set "MVRC=!ERRORLEVEL!"
+if /I "%~2"=="ok" goto :cs_expect_ok
+if "!MVRC!"=="0" goto :cs_expect_bad
+echo    PASS  %~4
+exit /b 0
+:cs_expect_ok
+if not "!MVRC!"=="0" goto :cs_expect_bad
+findstr /L /C:"%~3" "%BIN%\suites-s_client.log" >nul 2>&1
+if errorlevel 1 goto :cs_expect_bad
+echo    PASS  %~4
+exit /b 0
+:cs_expect_bad
+echo    FAIL  %~4  [s_client exit !MVRC!; see %BIN%\suites-s_client.log]
+set /a MVFAIL+=1
+exit /b 0
+
+REM cs_refusal <arg> <logname> <text the refusal must contain> <label>
+REM PASS only when the server never binds AND its log names the cause.
+:cs_refusal
+set "ARG=%~1"
+set "LOG=%BIN%\tls-%~2.log"
+set "OWNER="
+for /f "tokens=5" %%P in ('netstat -ano 2^>nul ^| findstr ":%TLS_PORT% " ^| findstr /I "LISTENING"') do set "OWNER=%%P"
+if not "!OWNER!"=="" goto :port_busy
+del /q "!LOG!" >nul 2>&1
+pushd "%BIN%"
+start "" /B cmd /c ""%SERVER_EXE%" !ARG! > "!LOG!" 2>&1"
+popd
+set /a TRIES=0
+:cs_ref_wait
+ping -n 2 127.0.0.1 >nul 2>&1
+set "SRVPID="
+for /f "tokens=5" %%P in ('netstat -ano 2^>nul ^| findstr ":%TLS_PORT% " ^| findstr /I "LISTENING"') do set "SRVPID=%%P"
+if not "!SRVPID!"=="" goto :cs_ref_served
+findstr /L /C:"%~3" "!LOG!" >nul 2>&1
+if not errorlevel 1 goto :cs_ref_ok
+set /a TRIES+=1
+if !TRIES! GEQ 10 goto :cs_ref_silent
+goto :cs_ref_wait
+:cs_ref_ok
+echo    PASS  %~4
+exit /b 0
+:cs_ref_served
+echo    FAIL  %~4  [the server STARTED - the suite list was accepted]
+taskkill /PID !SRVPID! /F /T >nul 2>&1
+call :mv_stop
+set /a MVFAIL+=1
+exit /b 0
+:cs_ref_silent
+echo    FAIL  %~4  [no listener, but the log does not contain "%~3"]
+call :dumplog
 set /a MVFAIL+=1
 exit /b 0
 
