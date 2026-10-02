@@ -79,7 +79,7 @@ begin
   Cfg.SSLEnabled       := True;
   Cfg.SSLCertFile      := 'server.pem';
   Cfg.SSLPrivKeyFile   := 'server.key';
-  Cfg.SSLVersionMethod := icsSslTLS13;     // TLS 1.3 only
+  Cfg.SSLVersionMethod := icsSslTLS13;     // TLS 1.3 minimum = TLS 1.3 only
 
   // Mutual TLS — require + verify client certificates
   Cfg.SSLCAFile        := 'ca.pem';
@@ -88,6 +88,8 @@ begin
   THorseProviderICS.ListenWithConfig(9443, Cfg);
 end.
 ```
+
+`SSLVersionMethod` is a **minimum**: `icsSslTLS12` still allows TLS 1.3, and `icsSslTLS13` refuses TLS 1.2 clients. It is enforced, and read back from the OpenSSL context at `Listen`, **since v1.0.9 (FIX-ICS-MINVER-1)**. Before that it was written to an ICS property that ICS ignores, so **no value had any effect**: `icsSslTLS13` served TLS 1.2 clients. Since v1.0.9 the TLS context is also built at `Listen`, so a bad certificate or key fails there, not at the first handshake.
 
 ## Architecture
 

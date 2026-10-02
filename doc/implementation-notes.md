@@ -70,20 +70,26 @@ Cfg.SSLCAFile     := 'ca.pem';
 Cfg.SSLVerifyPeer := True;
 ```
 
-TLS version selection maps to ICS's `TSslVersionMethod` (`SslVersionMethodFromConfig`):
+TLS version selection maps to ICS's **`SslMinVersion`** (since v1.0.9, FIX-ICS-MINVER-1):
 
-| `TICSSslMinVersion` | ICS value |
-|---|---|
-| `icsSslBest` (default) | `sslBestVer` (auto-negotiate, up to TLS 1.3) |
-| `icsSslTLS12` | `sslTLS_V1_2` |
-| `icsSslTLS13` | `sslBestVer` |
+| `TICSSslMinVersion` | ICS value | Effect |
+|---|---|---|
+| `icsSslBest` (default) | not set — ICS default | OpenSSL's own floor, up to TLS 1.3 |
+| `icsSslTLS12` | `SslMinVersion := sslVerTLS1_2` | minimum TLS 1.2; TLS 1.3 still allowed |
+| `icsSslTLS13` | `SslMinVersion := sslVerTLS1_3` | minimum TLS 1.3, i.e. TLS 1.3 only |
 
-> **Note:** ICS's `TSslVersionMethod` enum (`OverbyteIcsSslBase`) stops at
-> `sslTLS_V1_2`, then `sslBestVer` — there is **no** TLS-1.3-only member (and the
-> names use `_V1_`, not `_1_`). So `icsSslTLS13` maps to `sslBestVer`, which
-> negotiates the highest mutually-supported protocol (TLS 1.3 when both peers
-> support it) rather than forcing 1.3-only. Strict 1.3-only would additionally
-> need the SslContext options (`sslOpt2_NO_TLSv1`/`_1_1`/`_1_2`) — a follow-up.
+The context is built at `Listen` (`InitContext`), and the minimum is read back with `SSL_CTX_get_min_proto_version`. A mismatch makes `Listen` raise.
+
+> **Up to v1.0.8 this table was different, and none of it worked.** The value went
+> to `TSslContext.SslVersionMethod`, which ICS has **ignored since V8.27**: the
+> setter only stores it (`OverbyteIcsSslBase.pas:1245`, commented "V8.27
+> ignored"), and `InitContext` reads only `SslMinVersion`/`SslMaxVersion`
+> (:6983). The note that used to sit here said ICS has no TLS-1.3 member
+> and that strict 1.3-only would need `sslOpt2_NO_TLSv1_*` options; both
+> claims were wrong. `sslVerTLS1_3` maps to `TLS1_3_VERSION`
+> (`SslVerMethods`, :1161), and the "not yet supported, still draft" comment
+> beside it (:904) is stale.
+
 
 ## ICS server quirks (found during v1 bring-up)
 

@@ -6,6 +6,11 @@ REM
 REM  Runs HorseICSTLSTestServer + HorseICSTLSTestClient in two passes:
 REM    1. one-way TLS  (no argument)   -> T1, T2
 REM    2. mutual TLS   (mtls argument) -> T3, T4
+REM  then a third pass whose peer is openssl s_client, not our client:
+REM    3. minimum TLS version (FIX-ICS-MINVER-1) -> M0..M4. SSLVersionMethod
+REM       was written to an ICS property ICS ignores, so "TLS 1.3 only"
+REM       served TLS 1.2. Needs openssl.exe on PATH; without it the pass is
+REM       VOID (loud), never a pass.
 REM
 REM  Usage:  run-tls-tests.bat        (build first with build-tls-dcc.bat)
 REM  Exit code: 0 = all passed, N = N failed assertions, 2 = VOID (nothing ran).
@@ -81,12 +86,14 @@ call :runpass "" "one-way TLS" oneway
 set /a TOTAL+=%ERRORLEVEL%
 call :runpass "mtls" "mutual TLS" mtls
 set /a TOTAL+=%ERRORLEVEL%
+call :runminver
+set /a TOTAL+=%ERRORLEVEL%
 
 echo.
 echo ===========================================================================
 if "%VOIDED%"=="1" goto :report_void
 if not "%TOTAL%"=="0" goto :report_fail
-echo  ALL PASSED - one-way TLS and mutual TLS.
+echo  ALL PASSED - one-way TLS, mutual TLS and minimum TLS version.
 echo ===========================================================================
 exit /b 0
 :report_fail
@@ -155,6 +162,113 @@ exit /b 0
 echo    ---- server output ----
 if exist "!LOG!" type "!LOG!"
 echo    -----------------------
+exit /b 0
+
+REM ---------------------------------------------------------------------------
+REM Pass 3 - minimum TLS version. Judged by s_client's EXIT CODE plus its
+REM "New, TLSv1.x" line, never by OpenSSL error text (3.0 and 3.6 word the
+REM same failure differently). Control first: the default server must accept
+REM the TLS 1.2 client that minver13 must refuse - otherwise a client that
+REM cannot connect at all would read as enforcement. minver12 must STILL
+REM serve TLS 1.3: the setting is a minimum, and a fix that pinned 1.2 would
+REM silently remove TLS 1.3. A minver server that never binds is a FAIL, not
+REM VOID: the provider now reads the minimum back and refuses to start when
+REM it did not take, so not starting IS the defect reporting itself.
+:runminver
+echo.
+echo ===========================================================================
+echo  TLS pass: minimum protocol version  (openssl s_client peer)
+echo ===========================================================================
+set "OPENSSL="
+for /f "delims=" %%I in ('where openssl.exe 2^>nul') do if not defined OPENSSL set "OPENSSL=%%I"
+if not defined OPENSSL goto :mv_noopenssl
+set /a MVFAIL=0
+
+call :mv_server "" control
+if "!SRVPID!"=="" goto :mv_end
+call :mv_expect tls1_2 ok "New, TLSv1.2" "M0 control: default server serves a TLS 1.2 client"
+call :mv_stop
+
+call :mv_server "minver13" minver13
+if "!SRVPID!"=="" goto :mv_end
+call :mv_expect tls1_3 ok "New, TLSv1.3" "M1 icsSslTLS13: a TLS 1.3 client is served"
+call :mv_expect tls1_2 refused "" "M2 icsSslTLS13: a TLS 1.2 client is REFUSED"
+call :mv_stop
+
+call :mv_server "minver12" minver12
+if "!SRVPID!"=="" goto :mv_end
+call :mv_expect tls1_2 ok "New, TLSv1.2" "M3 icsSslTLS12: a TLS 1.2 client is served"
+call :mv_expect tls1_3 ok "New, TLSv1.3" "M4 icsSslTLS12 is a MINIMUM: TLS 1.3 is still served"
+call :mv_stop
+
+:mv_end
+exit /b !MVFAIL!
+
+:mv_noopenssl
+echo    [VOID] openssl.exe is not on PATH - the minimum TLS version was NOT
+echo           exercised. Add an OpenSSL bin directory to PATH and re-run.
+set "VOIDED=1"
+exit /b 0
+
+REM mv_server <arg> <logname> - sets SRVPID, or leaves it empty after counting
+REM the failure (or voiding the run when the port was already taken).
+:mv_server
+set "SRVPID="
+set "ARG=%~1"
+set "LOG=%BIN%\tls-%~2.log"
+set "OWNER="
+for /f "tokens=5" %%P in ('netstat -ano 2^>nul ^| findstr ":%TLS_PORT% " ^| findstr /I "LISTENING"') do set "OWNER=%%P"
+if not "!OWNER!"=="" goto :port_busy
+del /q "!LOG!" >nul 2>&1
+pushd "%BIN%"
+start "" /B cmd /c ""%SERVER_EXE%" !ARG! > "!LOG!" 2>&1"
+popd
+set /a TRIES=0
+:mv_wait
+for /f "tokens=5" %%P in ('netstat -ano 2^>nul ^| findstr ":%TLS_PORT% " ^| findstr /I "LISTENING"') do set "SRVPID=%%P"
+if not "!SRVPID!"=="" goto :mv_bound
+set /a TRIES+=1
+if !TRIES! GEQ 20 goto :mv_nobind
+ping -n 2 127.0.0.1 >nul 2>&1
+goto :mv_wait
+:mv_bound
+echo    server [%~2] pid !SRVPID! listening on port %TLS_PORT%
+exit /b 0
+:mv_nobind
+echo    FAIL  server [%~2] never bound port %TLS_PORT% - a refused minimum?
+call :dumplog
+set /a MVFAIL+=1
+exit /b 0
+
+:mv_stop
+taskkill /PID !SRVPID! /F /T >nul 2>&1
+set /a TRIES=0
+:mv_stop_wait
+set "OWNER="
+for /f "tokens=5" %%P in ('netstat -ano 2^>nul ^| findstr ":%TLS_PORT% " ^| findstr /I "LISTENING"') do set "OWNER=%%P"
+if "!OWNER!"=="" exit /b 0
+set /a TRIES+=1
+if !TRIES! GEQ 10 exit /b 0
+ping -n 2 127.0.0.1 >nul 2>&1
+goto :mv_stop_wait
+
+REM mv_expect <s_client protocol flag> <ok|refused> <line expected when ok> <label>
+:mv_expect
+"!OPENSSL!" s_client -connect 127.0.0.1:%TLS_PORT% -%~1 < nul > "%BIN%\minver-s_client.log" 2>&1
+set "MVRC=!ERRORLEVEL!"
+if /I "%~2"=="ok" goto :mv_expect_ok
+if "!MVRC!"=="0" goto :mv_expect_bad
+echo    PASS  %~4
+exit /b 0
+:mv_expect_ok
+if not "!MVRC!"=="0" goto :mv_expect_bad
+findstr /L /C:"%~3" "%BIN%\minver-s_client.log" >nul 2>&1
+if errorlevel 1 goto :mv_expect_bad
+echo    PASS  %~4
+exit /b 0
+:mv_expect_bad
+echo    FAIL  %~4  [s_client exit !MVRC!; see %BIN%\minver-s_client.log]
+set /a MVFAIL+=1
 exit /b 0
 
 :build_failed

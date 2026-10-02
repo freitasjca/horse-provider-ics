@@ -38,12 +38,14 @@ const
   ICS_DEFAULT_KEEPALIVE_TIME    = 30;   // seconds
 
 type
-  // Mirrors ICS TSslVersionMethod numerically; defined as plain integers so
-  // this config unit stays free of ICS dependencies. The provider translates
-  // these to the matching ICS enum at server-creation time.
-  //   0 = sslBestVer (auto-negotiate up to TLS 1.3 — default)
-  //   1 = TLS 1.2 only
-  //   2 = TLS 1.3 only
+  // MINIMUM negotiated TLS version. Kept free of ICS types so this config unit
+  // has no ICS dependency; the provider maps it to ICS's SslMinVersion at
+  // server-creation time and reads the result back from the OpenSSL context.
+  //   icsSslBest  = ICS / OpenSSL default floor (default)
+  //   icsSslTLS12 = TLS 1.2 minimum - TLS 1.3 is still allowed
+  //   icsSslTLS13 = TLS 1.3 minimum, i.e. TLS 1.3 only
+  // [FIX-ICS-MINVER-1] Before provider v1.0.9 this was written to ICS's
+  // SslVersionMethod, which ICS ignores, so NO value had any effect.
   TICSSslMinVersion = (icsSslBest, icsSslTLS12, icsSslTLS13);
 
   THorseICSConfig = record
@@ -105,7 +107,8 @@ type
     // never enforced. Verified by tests\run-tls-tests.bat (T4).
     SSLVerifyPeer:   Boolean;
 
-    // Minimum negotiated TLS version.
+    // Minimum negotiated TLS version (see TICSSslMinVersion). Enforced and
+    // verified at Listen since v1.0.9; ignored before.
     SSLVersionMethod: TICSSslMinVersion;
 
     // OpenSSL cipher list (empty → ICS default — sane modern ciphers).

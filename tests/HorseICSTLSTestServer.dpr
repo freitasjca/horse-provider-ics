@@ -118,11 +118,20 @@ begin
       Config.SSLVerifyPeer := True;
     end;
 
+    // [FIX-ICS-MINVER-1] `minver13` / `minver12` set SSLVersionMethod, which
+    // ICS used to ignore. run-tls-tests.bat pass 3 checks what an openssl
+    // s_client peer can actually negotiate against each.
+    if SameText(ParamStr(1), 'minver13') then
+      Config.SSLVersionMethod := icsSslTLS13
+    else if SameText(ParamStr(1), 'minver12') then
+      Config.SSLVersionMethod := icsSslTLS12;
+
     RegisterRoutes;
 
     Writeln(Format('[ICSTLSTest] certs: %s', [CertDir]));
     Writeln(Format('[ICSTLSTest] mode : %s',
       [IfThen(MTLS, 'mutual TLS (client cert required)', 'one-way TLS')]));
+    Writeln(Format('[ICSTLSTest] min  : %s', [ParamStr(1)]));
     Writeln(Format('[ICSTLSTest] Listening on https://127.0.0.1:%d  [OverbyteICS]', [TLS_PORT]));
     Writeln('[ICSTLSTest] Run HorseICSTLSTestClient'
       + IfThen(MTLS, ' mtls', '') + ' in a second terminal. Ctrl+C to stop.');

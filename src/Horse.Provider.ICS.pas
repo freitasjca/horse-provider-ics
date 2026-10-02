@@ -208,8 +208,6 @@ type
     class procedure InternalListen(const APort: Integer;
       const AConfig: THorseICSConfig);
 
-    class function  SslVersionMethodFromConfig: TSslVersionMethod;
-
   public
     class procedure StopListen; override;
 
@@ -243,7 +241,8 @@ uses
   Horse,
   Horse.Commons,
   Horse.Constants,
-  Horse.Exception.Interrupted;
+  Horse.Exception.Interrupted,
+  OverbyteIcsSSLEAY;   { [FIX-ICS-MINVER-1] TLS1_x_VERSION, SSL_CTX_get_min_proto_version }
 
 var
   // [FIX-ICS-GRACEFUL-1] Optional extra settle, DEFAULT 0. The drain below waits
@@ -441,25 +440,12 @@ begin
   InternalListen(APort, AConfig);
 end;
 
-class function THorseProviderICS.SslVersionMethodFromConfig: TSslVersionMethod;
-begin
-  case FConfig.SSLVersionMethod of
-    icsSslTLS12: Result := sslTLS_V1_2;
-    // ICS's TSslVersionMethod has no TLS-1.3-only member (it stops at sslTLS_V1_2,
-    // then sslBestVer). sslBestVer negotiates the highest mutually-supported
-    // protocol — TLS 1.3 when both peers support it. Strict 1.3-only enforcement
-    // would additionally disable older protocols via the SslContext options
-    // (sslOpt2_NO_TLSv1 / _NO_TLSv1_1 / _NO_TLSv1_2) — a follow-up, not required here.
-    icsSslTLS13: Result := sslBestVer;
-  else
-    Result := sslBestVer;
-  end;
-end;
-
 class procedure THorseProviderICS.InternalListen(const APort: Integer;
   const AConfig: THorseICSConfig);
 var
-  LSslSrv: TSslHttpServer;
+  LSslSrv:  TSslHttpServer;
+  LWantMin: Integer;
+  LGotMin:  Integer;
 begin
   // [SEC-32]
   if Assigned(FServer) then
@@ -510,9 +496,52 @@ begin
       FSslContext.SslVerifyPeerModes :=
         [SslVerifyMode_PEER, SslVerifyMode_FAIL_IF_NO_PEER_CERT,
          SslVerifyMode_CLIENT_ONCE];
-    FSslContext.SslVersionMethod := SslVersionMethodFromConfig;
+    // [FIX-ICS-MINVER-1] SSLVersionMethod used to be written to ICS's
+    // SslVersionMethod, which ICS has IGNORED since V8.27: the setter only
+    // stores it (OverbyteIcsSslBase.pas:1245 "V8.27 ignored"), and InitContext
+    // reads SslMinVersion/SslMaxVersion alone (:6983). So EVERY value did
+    // nothing - icsSslTLS13 ("TLS 1.3 only", README) accepted TLS 1.2 clients,
+    // and icsSslTLS12 enforced no minimum of its own (whatever floor OpenSSL's
+    // defaults imposed was the only one). SslMinVersion is what ICS applies, via
+    // SSL_CTX_set_min_proto_version. The max stays sslVerMax, so a TLS 1.2
+    // minimum still allows TLS 1.3. icsSslBest leaves ICS's own default.
+    // sslVerTLS1_3 IS mapped (to TLS1_3_VERSION, SslVerMethods :1161); the
+    // "not yet supported, still draft" comment on it at :904 is stale.
+    case AConfig.SSLVersionMethod of
+      icsSslTLS12: FSslContext.SslMinVersion := sslVerTLS1_2;
+      icsSslTLS13: FSslContext.SslMinVersion := sslVerTLS1_3;
+    end;
     if AConfig.SSLCipherList <> '' then
       FSslContext.SslCipherList  := AConfig.SSLCipherList;
+
+    // Build the OpenSSL context NOW instead of at the first TLS client, where
+    // ICS does it lazily (OverbyteIcsWSocket: `if SslCtxPtr = nil then
+    // InitContext`, so it is not repeated). Two reasons: a bad certificate or
+    // key now fails Listen instead of every handshake, and the configured
+    // minimum can be READ BACK from the context OpenSSL will actually use -
+    // a setting that was silently ignored once is not trusted on the next
+    // release's say-so. Any raise frees the context, so a retried Listen
+    // starts clean.
+    try
+      FSslContext.InitContext;
+      if AConfig.SSLVersionMethod <> icsSslBest then
+      begin
+        if AConfig.SSLVersionMethod = icsSslTLS13 then
+          LWantMin := TLS1_3_VERSION
+        else
+          LWantMin := TLS1_2_VERSION;
+        LGotMin := SSL_CTX_get_min_proto_version(FSslContext.SslCtxPtr);
+        if LGotMin <> LWantMin then
+          raise EHorseException.New.Error(Format(
+            'HORSE_PROVIDER_ICS: SSLVersionMethod asks for a minimum TLS ' +
+            'protocol of $%.4x, but the OpenSSL context reports $%.4x after ' +
+            'InitContext. Refusing to serve with a weaker minimum than ' +
+            'configured.', [LWantMin, LGotMin]));
+      end;
+    except
+      FreeAndNil(FSslContext);
+      raise;
+    end;
 
     LSslSrv := TSslHttpServer.Create(nil);
     LSslSrv.SslEnable  := True;

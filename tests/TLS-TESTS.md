@@ -55,7 +55,7 @@ shared `TCrossHttpClient` HTTPS driver from Delphi-Cross-Socket.
 run-tls-tests.bat
 ```
 
-Both passes, unattended. Exit **0** = all passed, **N** = N failed assertions,
+All three passes, unattended: one-way TLS, mutual TLS, and minimum TLS version. Pass 3 uses `openssl s_client` as the peer and needs `openssl.exe` on `PATH`; without it, that pass is VOID, never a pass. Exit **0** = all passed, **N** = N failed assertions,
 **2** = VOID (the suite did not run — port already held, or the server never
 bound). It refuses to start when port 9111 is occupied, because Windows lets a
 second process bind an already-owned port without error and the client would
@@ -91,6 +91,11 @@ HorseICSTLSTestClient mtls       # terminal 2  → T3, T4 pass
 | one-way | T5 `PUT /nobody` with **no** `Content-Length` → 200 | the lenient `THorseICSConnection` is installed on the **TLS** server (FIX-ICS-SSLCONN-1) |
 | mTLS | T3 `GET /ping` **with** client cert → 200 | `SslVerifyPeer` accepts a CA-signed client cert |
 | mTLS | T4 `GET /ping` **without** client cert → rejected | `SSL_VERIFY_PEER \| FAIL_IF_NO_PEER_CERT` enforced — **true only since FIX-ICS-MTLS-1** |
+| min version | M0 default server, `s_client -tls1_2` → served | **control**: the client M2 expects refused can connect at all |
+| min version | M1 `minver13`, `s_client -tls1_3` → served | `icsSslTLS13` still serves TLS 1.3 |
+| min version | M2 `minver13`, `s_client -tls1_2` → **refused** | `icsSslTLS13` is enforced — **true only since FIX-ICS-MINVER-1** (before it, ICS ignored the setting) |
+| min version | M3 `minver12`, `s_client -tls1_2` → served | `icsSslTLS12` serves TLS 1.2 |
+| min version | M4 `minver12`, `s_client -tls1_3` → served | `icsSslTLS12` is a **minimum**, not a pin |
 
 > **T4 is the assertion that matters, and it failed the first time it ran
 > (2026-09-24).** The provider set ICS's `SslVerifyPeer` and nothing else, which
@@ -137,7 +142,7 @@ HorseICSTLSTestClient mtls       # terminal 2  → T3, T4 pass
 ## Provider config exercised
 
 `THorseICSConfig`: `SSLEnabled`, `SSLCertFile`, `SSLPrivKeyFile`, `SSLCAFile`,
-`SSLVerifyPeer`, `SSLVersionMethod` — passed via
+`SSLVerifyPeer`, `SSLVersionMethod` (→ `SslMinVersion` since v1.0.9; the server's `minver12`/`minver13` arguments) — passed via
 `THorseProviderICS.ListenWithConfig(9111, Config)`, wired onto ICS's
 `TSslContext` (`SslCertFile` / `SslPrivKeyFile` / `SslCAFile` / `SslVerifyPeer`
 / `SslVerifyPeerModes`).
