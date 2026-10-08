@@ -242,6 +242,7 @@ uses
   Horse.Commons,
   Horse.Constants,
   Horse.Exception.Interrupted,
+  Horse.Response,      { [ICS-SENDSTREAM-REFUSE-1] RegisterStreamWriterFactory }
   OverbyteIcsSSLEAY,   { [FIX-ICS-MINVER-1] TLS1_x_VERSION, SSL_CTX_get_min_proto_version }
   OverbyteIcsLIBEAY;   { [ICS-TLS13-SUITES-1] OPENSSL_sk_num / OPENSSL_sk_value }
 
@@ -250,6 +251,25 @@ var
   // on COUNTERS rather than a clock, so this should not be needed; it exists to
   // characterise a residual gap without a rebuild. HORSE_ICS_SETTLE_MS.
   GICSSettleMs: Integer = -1;
+
+// [ICS-SENDSTREAM-REFUSE-1] Res.SendStream must fail LOUDLY on this provider.
+// It has no streaming engine (the PostMessage marshal-back cannot hold an ICS
+// reply open while a producer runs) and registered no stream writer, so Horse
+// used its default THorseWebBrokerStreamWriter. That writes through
+// RawWebRequest.WriteClient, a no-op on the hybrid adapter, so the client got
+// 200 with an EMPTY body while the app believed it had streamed (integration
+// test 47: FAIL "200 / []", 2026-10-08, ICS V9.7). Same defect and same fix as
+// horse-provider-mormot v1.0.15. The EHorseException becomes a 501 JSON error in
+// the worker pipeline. No double quotes in the message: the pipeline embeds it
+// in JSON unescaped.
+function ICSRefuseStreamWriter(const AResponse: THorseResponse): IHorseStreamWriter;
+begin
+  raise EHorseException.New
+    .Status(THTTPStatus.NotImplemented)
+    .Error('Res.SendStream is not supported by the ICS provider - send the ' +
+      'whole body with Res.Send, or use a provider with a streaming engine ' +
+      '(CrossSocket, nghttp2)');
+end;
 
 function ICSSettleMs: Integer;
 var
@@ -533,6 +553,13 @@ begin
 
   FConfig := AConfig;
   FPort   := APort;
+
+  // [ICS-SENDSTREAM-REFUSE-1] Registered here, at run time, not from a unit
+  // initialization: Horse.Response registers THorseWebBrokerStreamWriter from
+  // its own initialization, and the order of the two is not guaranteed, so a
+  // unit-level registration could be overwritten. Listen runs after every
+  // initialization, and the factory is process-wide (last writer wins).
+  THorseResponse.RegisterStreamWriterFactory(ICSRefuseStreamWriter);
 
   if not Assigned(FDrainEvent) then
     FDrainEvent := TEvent.Create(nil, True, True, '');

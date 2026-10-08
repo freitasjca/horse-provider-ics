@@ -24,6 +24,7 @@ uses
   Horse,
   Horse.Commons,
   Horse.Provider.ICS,
+  Horse.Response,   // IHorseStreamWriter (test 47)
   Horse.Core.Param,
   Horse.Core.Param.Field;
 
@@ -35,6 +36,18 @@ function JE(const S: string): string;
 begin
   Result := StringReplace(S,  '\', '\\', [rfReplaceAll]);
   Result := StringReplace(Result, '"', '\"', [rfReplaceAll]);
+end;
+
+// [SENDSTREAM-PROBE] Test 47. Two parts through Res.SendStream, the Horse
+// streaming API. Tests 33-36 hit hard-coded 501 stubs and never call it. This
+// provider registers no stream writer, so unless it refuses, Horse falls back to
+// THorseWebBrokerStreamWriter, which writes through RawWebRequest.WriteClient -
+// a no-op on the hybrid adapter. On mORMot that produced 200 with an EMPTY body
+// and no error (fixed there in v1.0.15). The client measures what happens here.
+procedure SendStreamProbeWriter(const AWriter: IHorseStreamWriter);
+begin
+  AWriter.Write('SENDSTREAM-PART-1;');
+  AWriter.Write('SENDSTREAM-PART-2');
 end;
 
 function JB(const B: Boolean): string;
@@ -363,6 +376,15 @@ begin
     begin
       Res.Status(501).ContentType('application/json; charset=utf-8')
          .Send('{"error":"chunked streaming not implemented on ICS transport"}');
+    end);
+
+  // [SENDSTREAM-PROBE] Unlike the three 501 stubs above, this route really calls
+  // Res.SendStream. Test 47: parts delivered, or a non-2xx refusal.
+  THorse.Get('/stream/sendstream',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      Res.ContentType('text/plain; charset=utf-8');
+      Res.SendStream(SendStreamProbeWriter);
     end);
 
   // FIX-DECODE-ONCE-1: query / form values are URL-decoded exactly once.

@@ -53,6 +53,9 @@
     35  GET    /stream/empty                 → 501 not-implemented + server still healthy
     36  GET    /stream/pull  ×2 concurrent   → both 501, server still healthy
                                                (concurrent-probe of streaming capability)
+    47  GET    /stream/sendstream            → Res.SendStream parts delivered, OR a
+                                               non-2xx refusal - never 2xx with the
+                                               parts lost (SENDSTREAM-PROBE)
 
   Note on test 12: ICS v1 does not decode multipart/form-data at the bridge
   level; the route returns 400 {"received":false,...}.  The check accepts 200
@@ -1081,6 +1084,28 @@ begin
     'GET', BASE_URL + '/params/decode?v=caf%C3%A9', '', 'caf' + #$00E9);
   CheckDecodeCase('45  PUT /params/decode-form  body v=100%25  (form-urlencoded - ContentFields)',
     'PUT', BASE_URL + '/params/decode-form', 'v=100%25', '100%');
+
+  // ── 47  Res.SendStream: delivered, or refused loudly - never lost ──────────
+  // [SENDSTREAM-PROBE] Ported from the mORMot suite, same number. The route
+  // streams two parts through Res.SendStream. This provider registers no
+  // stream writer of its own, so Horse may use THorseWebBrokerStreamWriter,
+  // which cannot reach the socket through the hybrid adapter. A non-2xx answer
+  // is acceptable - the caller learns streaming is unavailable. A 2xx without
+  // both parts is the defect: the app thinks it streamed and the client got
+  // nothing. mORMot failed exactly this (200 / []) until v1.0.15. Two checks.
+  Section('47  GET /stream/sendstream  (Res.SendStream - delivered, or refused loudly)');
+  DoSync(AClient, 'GET', BASE_URL + '/stream/sendstream', nil, nil, R);
+  if (R.StatusCode >= 200) and (R.StatusCode < 300) then
+    Check('2xx: both streamed parts delivered - not silently lost',
+      (Pos('SENDSTREAM-PART-1;', R.Body) > 0) and (Pos('SENDSTREAM-PART-2', R.Body) > 0),
+      Format('%d / [%s]', [R.StatusCode, R.Body]))
+  else
+    Check('non-2xx: refused loudly (not a timeout)',
+      R.StatusCode >= 400, Format('%d / [%s]', [R.StatusCode, R.Body]));
+  DoSync(AClient, 'GET', BASE_URL + '/ping', nil, nil, R);
+  Check('server healthy after the SendStream probe',
+    (R.StatusCode = 200) and (R.Body = 'pong'),
+    Format('%d / %s', [R.StatusCode, R.Body]));
 
 end;
 
