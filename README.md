@@ -257,6 +257,14 @@ ICS's HTTP server enforces some rules strictly; the provider works around what i
 can, but a few user-visible constraints remain (full detail in
 `doc/implementation-notes.md` → *ICS server quirks*):
 
+- **Streaming is not supported: `Res.SendStream` answers `501 Not Implemented`**
+  with a JSON error (since v1.0.11). The provider has no streaming engine: its
+  PostMessage marshal-back cannot hold an ICS reply open while a producer runs.
+  Send the whole body with `Res.Send`, or use a provider that streams (CrossSocket,
+  nghttp2). Before v1.0.11, `Res.SendStream` fell back to Horse's WebBroker stream
+  writer, which cannot reach the socket through this provider: the client got `200`
+  with an **empty body** and no error, while the route believed it had streamed.
+  Integration test 47 gates the refusal (ICS-SENDSTREAM-REFUSE-1).
 - **Uploads must send `Content-Length`.** ICS rejects any POST/PUT/PATCH with no
   `Content-Length` (i.e. a *chunked* request body) with `400`, before the handler
   runs. Browsers and most clients send `Content-Length` on uploads, so this is
@@ -303,6 +311,23 @@ tests/
 
 - [`HashLoad/horse`](https://github.com/HashLoad/horse) >= 3.3.10 — 3.3.0 was the first official release with `IHorseRawRequest` / `IHorseRawResponse`, `HORSE_PROVIDER_*` define normalization, and `Res.Cookie(...)` (RFC 6265 typed-cookie API in `Horse.Core.Cookie`). The floor is **3.3.10 from provider v1.0.8**, because `StopListenGraceful` is silently inert through `THorse` on anything earlier — see [Graceful shutdown](#graceful-shutdown). The `freitasjca/horse` fork is retired.
 - [OverbyteICS v9.7](https://wiki.overbyte.eu/wiki/index.php/ICS_Download) (`icsv97/Source` added to the project search path; multipart decoding uses ICS's own `OverbyteIcsFormDataDecoder`)
+
+  Tested on 2026-10-08 with Horse 3.3.12 and Delphi 12. Each result covers the
+  integration suite, the graceful-shutdown drain and the TLS suite:
+
+  | ICS | Result |
+  |---|---|
+  | **V9.7** (release, May 2026) | all green |
+  | **V9.8 Beta** (SVN `icsv9`, Oct 2026) | all green, no provider change needed |
+  | **V10.0 Beta** (SVN `icsv10`) | **not supported**: does not compile |
+
+  V10 replaces `TIcsWndControl`'s window-message plumbing (`WndProc`,
+  `AllocateHWnd`, `AllocateMsgHandler`) with a new cross-platform messaging system
+  (`ICS_NewMessaging`, on by default). The provider uses that plumbing to hand each
+  worker-thread response back to the ICS thread.
+
+  The test build scripts take the ICS tree from `ICS_ROOT` (default
+  `<repo parent>\icsv97`), e.g. `set ICS_ROOT=C:\lang\Repo\icsv98`.
 
 ICS is not Boss-installable — same situation as mORMot. Add `icsv97/Source` to the project's library path manually.
 

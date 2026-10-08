@@ -92,7 +92,7 @@ echo    bin\HorseICSTestServer      terminal 1  (listens on 127.0.0.1:9010)
 echo    bin\HorseICSTestClient      terminal 2
 echo.
 echo  Client exit code = number of failed checks; 0 means all passed.
-echo  Green baseline: 117/117.
+echo  Green baseline: 119/119 (117 before test 47, v1.0.11).
 echo.
 echo  PORT 9010 IS SHARED with the CrossSocket and mORMot suites, so only
 echo  one server may run at a time. Windows lets a second process bind the same
