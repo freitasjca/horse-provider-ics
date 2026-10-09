@@ -39,6 +39,8 @@ uses
   System.StrUtils,                 // IfThen (string)
   Horse,
   Horse.Commons,
+  OverbyteIcsTypes,                // GLIBEAY_DLL_FileName
+  OverbyteIcsLIBEAY,               // IcsLoadSsl / IcsUnloadSsl / OpenSslVersion
   Horse.Provider.ICS.Config,       // THorseICSConfig
   Horse.Provider.ICS;
 
@@ -141,7 +143,16 @@ begin
 
     RegisterRoutes;
 
+    // [TLS-OSSLVER-1] Name the OpenSSL runtime this process actually loaded.
+    // ICS ships libcrypto-3 AND libcrypto-4 in ICS-OpenSSL\, and which one
+    // loads decides what the TLS passes measured. IcsLoadSsl is reference-
+    // counted, so the provider's InitContext at Listen reuses this load;
+    // IcsUnloadSsl below pairs with it. GLIBEAY_DLL_FileName holds the full
+    // path once loaded. run-tls-tests.bat echoes the line on every pass.
+    IcsLoadSsl;
     Writeln(Format('[ICSTLSTest] certs: %s', [CertDir]));
+    Writeln(Format('[ICSTLSTest] OpenSSL: %s from %s',
+      [OpenSslVersion, GLIBEAY_DLL_FileName]));
     Writeln(Format('[ICSTLSTest] mode : %s',
       [IfThen(MTLS, 'mutual TLS (client cert required)', 'one-way TLS')]));
     Writeln(Format('[ICSTLSTest] min  : %s', [ParamStr(1)]));
@@ -149,7 +160,11 @@ begin
     Writeln('[ICSTLSTest] Run HorseICSTLSTestClient'
       + IfThen(MTLS, ' mtls', '') + ' in a second terminal. Ctrl+C to stop.');
 
-    THorseProviderICS.ListenWithConfig(TLS_PORT, Config);
+    try
+      THorseProviderICS.ListenWithConfig(TLS_PORT, Config);
+    finally
+      IcsUnloadSsl;
+    end;
     Writeln('[ICSTLSTest] Server stopped.');
   except
     on E: Exception do
