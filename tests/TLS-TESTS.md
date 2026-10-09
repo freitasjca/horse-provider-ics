@@ -33,7 +33,10 @@ build-tls-dcc.bat            # Release (default); or: build-tls-dcc.bat Debug
 ```
 
 Builds both programs into `bin\`, copies `certs\`, and copies ICS's OpenSSL DLLs
-(found under `icsv97\ICS-OpenSSL\`) beside them. Override the ICS location with
+(found under `icsv97\ICS-OpenSSL\`) beside them. **With ICS's default settings those
+copies are not what runs:** ICS links OpenSSL 4.0 into the `.exe` and loads it from
+`C:\ProgramData\ICS-OpenSSL\<version>\` (see the README, *Which OpenSSL your server
+loads*). Every pass prints the OpenSSL actually loaded. Override the ICS location with
 `set "ICS_ROOT=<path to icsv97>"`; it defaults to the sibling checkout layout.
 Win64 only, run from this `tests\` folder.
 
@@ -88,7 +91,11 @@ HorseICSTLSTestClient mtls       # terminal 2  → T3, T4 pass
 |---|---|---|
 | one-way | T1 `GET /ping` → 200 "pong" | TLS handshake + HTTPS round-trip (TSslHttpServer) |
 | one-way | T2 `POST /echo` → body echoed | request body survives the TLS path |
-| one-way | T5 `PUT /nobody` with **no** `Content-Length` → 200 | the lenient `THorseICSConnection` is installed on the **TLS** server (FIX-ICS-SSLCONN-1) |
+| one-way | T5a `PUT /nobody`, empty body, `Content-Length: 0` → 200 | an empty PUT over TLS reaches the handler |
+| one-way | T5r raw `GET /ping` with `Connection: close` (`openssl s_client`, from `run-tls-tests.bat`) → `pong` | **control**: the raw sender delivers requests at all |
+| one-way | T5b raw `PUT /nobody` with **no** `Content-Length` → `put-ok` | the lenient `THorseICSConnection` is installed on the **TLS** server (FIX-ICS-SSLCONN-1) |
+| one-way | T5c raw `PUT /nobody`, `Content-Length: 0`, `Connection: close` → `put-ok` | an empty-body request asking to close still gets its reply (FIX-ICS-CONNCLOSE-1) |
+| one-way | T6 `GET /openssl` → `OpenSSL <version> from <path>` | `THorseProviderICS.OpenSslRuntime` reports the OpenSSL that `Listen` loaded (ICS-OSSLRUNTIME-1) |
 | mTLS | T3 `GET /ping` **with** client cert → 200 | `SslVerifyPeer` accepts a CA-signed client cert |
 | mTLS | T4 `GET /ping` **without** client cert → rejected | `SSL_VERIFY_PEER \| FAIL_IF_NO_PEER_CERT` enforced — **true only since FIX-ICS-MTLS-1** |
 | min version | M0 default server, `s_client -tls1_2` → served | **control**: the client M2 expects refused can connect at all |
@@ -120,6 +127,23 @@ HorseICSTLSTestClient mtls       # terminal 2  → T3, T4 pass
 > could detect this**, which is why it is worth keeping even though "not 200" is
 > a weak assertion on its own.
 
+> **T5c - FIX-ICS-CONNCLOSE-1, found by T5b on 2026-10-09.** The raw requests all carry
+> `Connection: close`, and both PUTs got **no response at all**, while T5r's GET was
+> answered and the client's keep-alive T5a passed. ICS's `ProcessPostPutPat` ends with
+> `else if FKeepAlive = FALSE then CloseDelayed`, and the provider's `hgWillSendMySelf`
+> (answer later, from a worker) lands in that branch: with `Connection: close` the
+> socket was closed before the answer existed. It needs an empty body (with a body the
+> provider dispatches later, from `OnPostedData`) and is not TLS-specific: curl against
+> the plain-HTTP server gave `000` for an empty PUT with `Connection: close` and `200`
+> with keep-alive. Fixed by overriding `ProcessPostPutPat` in `THorseICSConnection`.
+>
+> **T5 lost its detector on 2026-10-08, and T5b replaces it.** Delphi-Cross-Socket
+> 1.0.16 (winddriver #208) makes `TCrossHttpClient` send `Content-Length: 0` for an
+> empty POST/PUT/PATCH, so the client's PUT stopped reaching ICS's reject path. It
+> still passed, testing nothing, in the 2026-10-08 run. T5b sends the
+> no-`Content-Length` request raw through `openssl s_client`, which no client library
+> can change. The text below describes the original T5, which is T5b now.
+>
 > **T5 (FIX-ICS-SSLCONN-1).** `ClientClass := THorseICSConnection` was assigned
 > only on the plain-HTTP branch, so over TLS the provider ran ICS's stock
 > connection and lost two behaviours at once. `TCrossHttpClient` omits

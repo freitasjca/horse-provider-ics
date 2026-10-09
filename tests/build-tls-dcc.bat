@@ -103,9 +103,12 @@ if not exist "!EXEDIR!\certs" mkdir "!EXEDIR!\certs" 2>nul
 copy /y "%~dp0certs\*" "!EXEDIR!\certs\" >nul
 
 REM -- OpenSSL runtime. ICS ships its own DLLs, but their location varies by
-REM    distribution, so find them rather than assume a folder. Without them the
-REM    server starts, reports itself listening, and fails every handshake --
-REM    the exact silent failure the mORMot suite hit.
+REM    distribution, so find them rather than assume a folder. With ICS's
+REM    DEFAULT OverbyteIcsDefs.inc these copies are not used: OpenSSL_Resource_Files
+REM    links OpenSSL 4.0 into the exe and ICS loads it from
+REM    C:\ProgramData\ICS-OpenSSL\<version>\ (README, "Which OpenSSL your server
+REM    loads"). They are needed only for an ICS built without OpenSSL_Resource_Files
+REM    and OpenSSL_ProgramData. run-tls-tests.bat prints what actually loaded.
 set "SSLSRC="
 for /f "delims=" %%F in ('dir /s /b "!ICS_ROOT!\*libssl*-x64.dll" 2^>nul') do if not defined SSLSRC set "SSLSRC=%%~dpF"
 if not defined SSLSRC goto :warn_openssl

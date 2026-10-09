@@ -335,31 +335,61 @@ ICS is not Boss-installable — same situation as mORMot. Add `icsv97/Source` to
 
 | File | Windows | Linux / macOS | When |
 |---|---|---|---|
-| OpenSSL | `libssl-3-x64.dll`<br>`libcrypto-3-x64.dll` | `libssl.so.3`<br>`libcrypto.so.3` | TLS / mTLS only |
+| OpenSSL | **none with ICS's default settings**: linked into the `.exe` (see below) | `libcrypto.so.N` + `libssl.so.N`, N = the major version ICS was built for (4 by default) | TLS / mTLS only |
 
-Nothing else — the ICS engine itself compiles into your binary, so a plain-HTTP
-build ships as a single `.exe`.
+Nothing else: the ICS engine compiles into your binary, so a plain-HTTP build ships
+as a single `.exe`.
 
-**The OpenSSL libraries come with ICS.** They are in the ICS distribution
-(`icsv97/`), already matched to the ICS version you compiled against, so there
-is no version hunt and no mismatch against a system-wide OpenSSL. This is a real
-advantage over the CrossSocket, mORMot and nghttp2 providers, all of which
-expect you to source OpenSSL yourself and keep its version in step. Copy the
-pair next to your `.exe` rather than into `System32`.
+#### Which OpenSSL your server loads
 
-For a **Windows Service**, the DLLs must sit in the same folder as the service
-`.exe` — the Service Control Manager does not inherit the interactive user's
-`PATH`, so a copy that works when you double-click will fail when the service
-starts.
+**ICS decides this when it is compiled, not at run time.** The switches are in ICS's
+`Source/Include/OverbyteIcsDefs.inc`; this provider does not override them. With ICS
+V9.7's defaults on Windows:
 
-ICS 4.x-era builds may name the pair `libssl-1_1-x64.dll` / `libcrypto-1_1-x64.dll`.
-Pick one version family and use it throughout: 1.1.x and 3.x cannot coexist in a
-single process.
+- `OpenSSL_Resource_Files` is on, and `OpenSSL_40` with it. The OpenSSL **4.0** DLLs
+  are linked into the `.exe` as resources. On first use ICS extracts them to
+  `C:\ProgramData\ICS-OpenSSL\<version>\` (for example `...\4000\`) and loads them
+  from there.
+- **DLLs placed beside the `.exe` are ignored**, and so is `GSSL_DLL_DIR` if your code
+  sets it: ICS overwrites it with the extraction folder (`OverbyteIcsLIBEAY.pas`,
+  `IcsOpenSslResource`). `OpenSSL_ProgramData`, also on by default, overwrites it too.
+- The process needs write access to `C:\ProgramData\ICS-OpenSSL\` the first time it
+  runs. Services running as LocalSystem have it; a locked-down account may not.
+
+To run another OpenSSL, change `OverbyteIcsDefs.inc` and rebuild:
+
+| Goal | Change |
+|---|---|
+| Link OpenSSL 3.5 (LTS) instead of 4.0 | `OpenSSL_35` instead of `OpenSSL_40`, and `OpenSSL_Major_3` instead of `OpenSSL_Major_4` |
+| Load DLLs that you ship yourself | undefine `OpenSSL_Resource_Files` and `OpenSSL_ProgramData`; ICS then loads `libcrypto-N-x64.dll` / `libssl-N-x64.dll` from `GSSL_DLL_DIR`, or from the standard DLL search when it is empty (the `.exe` folder first) |
+
+On **Linux / macOS** nothing is linked: ICS loads `libcrypto.so.N` / `libssl.so.N`
+(`.N.dylib` on macOS), with N from `OpenSSL_Major_N`. **The default is 4**, so a
+distribution that ships only OpenSSL 3 needs `OpenSSL_Major_3` (not yet verified on
+Linux with this provider; see *Out of scope / follow-ups*).
+
+**Check what you deployed.** `THorseProviderICS.OpenSslRuntime` returns the version and
+the full path of the `libcrypto` that `Listen` loaded, for example
+`OpenSSL 4.0.0 14 Apr 2026 from C:\ProgramData\ICS-OpenSSL\4000\libcrypto-4-x64.dll`.
+Log it at startup. The test suite's `run-tls-tests.bat` prints it on every pass.
+
+> **Correction (v1.0.12).** Earlier versions of this README said to copy
+> `libssl-3-x64.dll` / `libcrypto-3-x64.dll` next to the `.exe`. With ICS's default
+> settings those copies are never loaded, and every TLS result recorded for this
+> provider so far was measured on the linked OpenSSL 4.0.0.
+
+For a **Windows Service** that ships its own DLLs (the second row above), put them in
+the service's folder: the Service Control Manager does not inherit the interactive
+user's `PATH`.
 
 ## Out of scope / follow-ups
 
 - **Delphi POSIX (Linux64 / macOS)** — **supported** via ICS's own POSIX layer (see *Platform scope*). The message-loop marshaling, multipart decoding, and OpenSSL TLS all carry over with no provider code change; the Linux daemon shape ships in `Horse.Provider.ICS.Daemon`.
 - **FPC / Lazarus** — still **not viable with stock ICS**: ICS's POSIX support rides the *Delphi* POSIX RTL (`Posix.*`, not FPC's `BaseUnix`), and ICS additionally undefines `USE_SSL` under FPC (`icsv97/Source/Include/OverbyteIcsDefs.inc:2429`), so `TSslHttpServer` does not compile and an ICS-on-Lazarus build would be plain-HTTP only — no advantage over the CrossSocket provider, which already runs on Lazarus *with* TLS. The `{$IF DEFINED(FPC)}` FATAL stays; full analysis in `plans/ics-lazarus-fpc.md`.
+- **TLS on Linux is not yet verified with ICS V9.7's OpenSSL default.** ICS asks for
+  `libcrypto.so.4` unless built with `OpenSSL_Major_3`, and many distributions ship only
+  OpenSSL 3. Run `tests/run-tls-tests` on Linux64 and record `OpenSslRuntime` before
+  relying on it.
 - **FMX cross-platform host** (`Ics.Fmx.OverbyteIcsHttpSrv`) — optional later.
 - **Bench server** — functional parity is reached; a throughput bench is the natural next step.
 

@@ -77,7 +77,11 @@ if not exist "%CLIENT_EXE%" goto :not_built
 if not exist "%BIN%\certs\server.crt" goto :no_certs
 
 REM  ICS ships its own OpenSSL; build-tls-dcc.bat copies it from ICS-OpenSSL\.
-REM  Without it the handshake fails while the server still reports listening.
+REM  NOTE: with ICS's default OverbyteIcsDefs.inc (OpenSSL_Resource_Files) these
+REM  copies are NOT what runs - ICS loads the OpenSSL linked into the exe from
+REM  C:\ProgramData\ICS-OpenSSL\<version>\. They matter only for an ICS built
+REM  without OpenSSL_Resource_Files and OpenSSL_ProgramData. The OpenSSL: line
+REM  each pass prints is the authority on what was tested.
 set "HAVESSL="
 for /f "delims=" %%F in ('dir /b "%BIN%\libssl*-x64.dll" 2^>nul') do set "HAVESSL=1"
 if not defined HAVESSL goto :no_openssl
@@ -156,8 +160,46 @@ echo    !OSSL!
 "%CLIENT_EXE%" !ARG!
 set "PASS_EXIT=!ERRORLEVEL!"
 
+REM -- Raw requests, one-way pass only, sent through openssl s_client so no
+REM    client library can rewrite them. All carry "Connection: close".
+REM    T5r  GET /ping                       - CONTROL: the raw sender works at all
+REM    T5b  PUT /nobody, NO Content-Length  - FIX-ICS-SSLCONN-1. Since DCS 1.0.16
+REM         (winddriver #208) TCrossHttpClient always sends Content-Length: 0,
+REM         so the client's T5a no longer reaches ICS's no-Content-Length path.
+REM    T5c  PUT /nobody, Content-Length: 0  - FIX-ICS-CONNCLOSE-1: ICS closed a
+REM         "Connection: close" connection before the deferred answer was sent,
+REM         so an empty-body POST/PUT/PATCH got NO response (T5b found it).
+if not "!ARG!"=="" goto :raw_done
+set "RAWSSL="
+for /f "delims=" %%I in ('where openssl.exe 2^>nul') do if not defined RAWSSL set "RAWSSL=%%I"
+if not defined RAWSSL goto :raw_noopenssl
+call :raw_check T5r raw-get-ping.txt pong "GET /ping (raw control)"
+set /a PASS_EXIT+=!ERRORLEVEL!
+call :raw_check T5b raw-put-nobody.txt put-ok "PUT /nobody, NO Content-Length"
+set /a PASS_EXIT+=!ERRORLEVEL!
+call :raw_check T5c raw-put-cl0.txt put-ok "PUT /nobody, Content-Length: 0, Connection: close"
+set /a PASS_EXIT+=!ERRORLEVEL!
+goto :raw_done
+:raw_noopenssl
+echo   [VOID] T5r/T5b/T5c need openssl.exe on PATH - the raw requests were NOT sent.
+set "VOIDED=1"
+:raw_done
+
 taskkill /PID !SRVPID! /F /T >nul 2>&1
 exit /b !PASS_EXIT!
+
+REM raw_check <id> <request file> <text the response must contain> <label>
+REM  -quiet implies -ign_eof: s_client keeps reading after stdin ends, and the
+REM  request's Connection: close makes the server end the session.
+:raw_check
+"!RAWSSL!" s_client -quiet -connect 127.0.0.1:%TLS_PORT% < "%~dp0%~2" > "%BIN%\raw-%~1.log" 2>&1
+findstr /L /C:"%~3" "%BIN%\raw-%~1.log" >nul 2>&1
+if errorlevel 1 goto :raw_fail
+echo   PASS  %~1 %~4 -^> %~3
+exit /b 0
+:raw_fail
+echo   FAIL  %~1 %~4 - no "%~3" in the response. Response: %BIN%\raw-%~1.log
+exit /b 1
 
 :port_busy
 echo    [VOID] port %TLS_PORT% is already held by pid !OWNER!.

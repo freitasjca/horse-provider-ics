@@ -159,6 +159,7 @@ type
     class var FPostBuffers:    TDictionary<TObject, TICSPendingPost>;
     class var FNextToken:      NativeUInt;
     class var FLiveConns:      TDictionary<TObject, Boolean>;
+    class var FOpenSslRuntime: string;            // [ICS-OSSLRUNTIME-1]
 
     class function  GetPort: Integer; static;
     class procedure SetPort(const AValue: Integer); static;
@@ -231,6 +232,15 @@ type
     // [FIX-ICS-GRACEFUL-1] shared teardown tail — see the implementation.
     class procedure StopTeardown;
 
+    // [ICS-OSSLRUNTIME-1] The OpenSSL this process loaded for TLS, as
+    // '<OpenSSL version text> from <libcrypto full path>', set by Listen once
+    // the TLS context is built; '' before that and when SSLEnabled is False.
+    // Which OpenSSL loads is decided when ICS is COMPILED (OverbyteIcsDefs.inc),
+    // not by this provider: by default ICS V9.7 links OpenSSL 4.0 into the exe
+    // and loads it from C:\ProgramData\ICS-OpenSSL\<version>\, ignoring DLLs
+    // beside the exe. Log this value at startup to know what you deployed.
+    class function OpenSslRuntime: string; static;
+
     class property Port:   Integer          read GetPort write SetPort;
     class property Config: THorseICSConfig  read FConfig;
   end;
@@ -244,7 +254,9 @@ uses
   Horse.Exception.Interrupted,
   Horse.Response,      { [ICS-SENDSTREAM-REFUSE-1] RegisterStreamWriterFactory }
   OverbyteIcsSSLEAY,   { [FIX-ICS-MINVER-1] TLS1_x_VERSION, SSL_CTX_get_min_proto_version }
-  OverbyteIcsLIBEAY;   { [ICS-TLS13-SUITES-1] OPENSSL_sk_num / OPENSSL_sk_value }
+  OverbyteIcsLIBEAY,   { [ICS-TLS13-SUITES-1] OPENSSL_sk_num / OPENSSL_sk_value; OpenSslVersion }
+  OverbyteIcsTypes;    { [ICS-OSSLRUNTIME-1] GLIBEAY_DLL_FileName. Its only name shared
+                         with this unit is TBytes, an alias of SysUtils.TBytes on D2007+ }
 
 var
   // [FIX-ICS-GRACEFUL-1] Optional extra settle, DEFAULT 0. The drain below waits
@@ -389,17 +401,65 @@ type
   // Content-Length was supplied, treat it as a valid zero-length body so the
   // document event fires. ProcessDelete already takes a no-body escape; PUT/PATCH
   // do not, so we add it here. Installed via THttpServer.ClientClass.
+  //
+  // [FIX-ICS-CONNCLOSE-1] ProcessPostPutPat is also overridden. After the
+  // POST/PUT/PATCH (and DELETE-with-Content-Length) document event, ICS runs
+  //   case Flags of ... else if FKeepAlive = FALSE then CloseDelayed;
+  // and hgWillSendMySelf - the provider's "answer comes later from a worker" -
+  // falls into that else. With "Connection: close" the socket was therefore
+  // closed BEFORE the deferred answer existed, and the client got no response
+  // at all. Only when the provider dispatches from inside the event, i.e. an
+  // empty body (a body is collected first via hgAcceptData and dispatched from
+  // OnPostedData, which has no such close). Found 2026-10-09 by the TLS suite's
+  // raw T5b; plain HTTP is affected identically (curl: PUT, Content-Length: 0,
+  // Connection: close -> no response; keep-alive -> 200).
   THorseICSConnection = class(THttpConnection)
+  private
+    FClientKeepAlive: Boolean;   // what the client asked for (FIX-ICS-CONNCLOSE-1)
+    FHoldOpen:        Boolean;   // inside ProcessPostPutPat, keep-alive forced on
   protected
     procedure ProcessPut; override;
     procedure ProcessPatch; override;
+    procedure ProcessPostPutPat; override;
   public
     procedure DisableKeepAlive;
+    procedure RestoreClientKeepAlive;
   end;
 
 procedure THorseICSConnection.DisableKeepAlive;
 begin
   FKeepAlive := False;
+end;
+
+// [FIX-ICS-CONNCLOSE-1] Hold the connection open while ICS runs the document
+// event, so its trailing "else if FKeepAlive = FALSE then CloseDelayed" cannot
+// close a connection whose answer is still being computed on a worker. The
+// deferred answer (DispatchOnLoop) calls DisableKeepAlive, so ICS still closes
+// the connection - after the reply is sent. ICS's own reject paths set
+// FKeepAlive := False themselves and close; that is kept: the restore below
+// only applies while FKeepAlive is still the value forced here.
+procedure THorseICSConnection.ProcessPostPutPat;
+begin
+  FClientKeepAlive := FKeepAlive;
+  FHoldOpen        := True;
+  FKeepAlive       := True;
+  try
+    inherited;
+  finally
+    FHoldOpen := False;
+    if FKeepAlive then
+      FKeepAlive := FClientKeepAlive;
+  end;
+end;
+
+// [FIX-ICS-CONNCLOSE-1] For an answer written synchronously inside the
+// document event (AnswerError: 405/413/...): put back what the client asked
+// for first, so that answer behaves exactly as before the fix - including
+// ICS closing a "Connection: close" connection right after it.
+procedure THorseICSConnection.RestoreClientKeepAlive;
+begin
+  if FHoldOpen then
+    FKeepAlive := FClientKeepAlive;
 end;
 
 procedure THorseICSConnection.ProcessPut;
@@ -553,6 +613,7 @@ begin
 
   FConfig := AConfig;
   FPort   := APort;
+  FOpenSslRuntime := '';
 
   // [ICS-SENDSTREAM-REFUSE-1] Registered here, at run time, not from a unit
   // initialization: Horse.Response registers THorseWebBrokerStreamWriter from
@@ -665,6 +726,10 @@ begin
             '(e.g. TLS_AES_256_GCM_SHA384). Refusing to serve with fewer ' +
             'suites than configured.', [LMissing]));
       end;
+      // [ICS-OSSLRUNTIME-1] InitContext loaded OpenSSL (if nothing had yet), so
+      // the version and the full path ICS resolved are known now.
+      // GLIBEAY_DLL_FileName holds the path GetModuleFileName returned.
+      FOpenSslRuntime := Format('%s from %s', [OpenSslVersion, GLIBEAY_DLL_FileName]);
     except
       FreeAndNil(FSslContext);
       raise;
@@ -754,6 +819,11 @@ begin
     // ICS's MessageLoop runs until Terminated. Terminated is set by Stop.
     FServer.MessageLoop;
   end;
+end;
+
+class function THorseProviderICS.OpenSslRuntime: string;
+begin
+  Result := FOpenSslRuntime;
 end;
 
 class procedure THorseProviderICS.StopListen;
@@ -1440,6 +1510,9 @@ begin
     LHeader := LHeader + 'Server: unknown'#13#10;
   LBody := Format('{"error":"%s"}',
     [StringReplace(AMessage, '"', '\"', [rfReplaceAll])]);
+  // [FIX-ICS-CONNCLOSE-1] synchronous answer: honour the client's keep-alive.
+  if Client is THorseICSConnection then
+    THorseICSConnection(Client).RestoreClientKeepAlive;
   try
     // [FIX-ICS-UTF8-BODY] UTF-8 bytes via AnswerBodyTB. AMessage can carry
     // non-ASCII text, which AnswerString would send in the ANSI code page.

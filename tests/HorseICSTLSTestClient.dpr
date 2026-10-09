@@ -172,23 +172,31 @@ begin
       (not R.TimedOut) and (R.StatusCode = 200) and (R.Body = 'hello-tls'),
       Format('status=%d body=%s', [R.StatusCode, R.Body]));
 
-    // [FIX-ICS-SSLCONN-1] An empty body makes TCrossHttpClient omit
-    // Content-Length entirely (_CreateRequestHeader only emits it when
-    // ABodySize > 0), which is exactly the case ICS rejects with 400 before the
-    // handler runs. Reaching the route proves the provider installed its
-    // lenient THorseICSConnection on the TLS server — which it did not do until
-    // 2026-09-24, because ClientClass was assigned only on the plain-HTTP
-    // branch. A 400 here means that assignment is missing again.
-    //
-    // This also covers, indirectly, the more serious half of that omission: the
-    // keep-alive guard in ExecutePending tests `Conn is THorseICSConnection`,
-    // so it is unreachable whenever this assertion fails.
+    // [FIX-ICS-SSLCONN-1] T5a: a body-less PUT over TLS reaches the handler.
+    // Until Delphi-Cross-Socket 1.0.15 TCrossHttpClient sent NO Content-Length
+    // for an empty body, which is the request ICS rejects with 400 before the
+    // handler runs unless the provider's lenient THorseICSConnection is the
+    // TLS server's ClientClass. DCS 1.0.16 (winddriver #208) sends
+    // Content-Length: 0 instead, so this check no longer reaches that path:
+    // it now covers only the Content-Length: 0 case. The no-Content-Length
+    // case is T5b, sent raw through openssl s_client by run-tls-tests.bat,
+    // which no client library can "fix".
     R := DoSync(LClient, 'PUT', BASE_URL + '/nobody', '');
-    Check('T5  PUT /nobody (no Content-Length) over https → handler ran',
+    Check('T5a PUT /nobody (empty body, Content-Length: 0) over https -> handler ran',
       (not R.TimedOut) and (R.StatusCode = 200) and (R.Body = 'put-ok'),
-      Format('status=%d body=%s  (400 = ICS rejected it before the handler; ' +
-             'ClientClass not installed on the TLS server)',
-             [R.StatusCode, R.Body]));
+      Format('status=%d body=%s', [R.StatusCode, R.Body]));
+
+    // [ICS-OSSLRUNTIME-1] The provider records the OpenSSL it loaded at
+    // Listen. Read it from the running server: it must name an OpenSSL build
+    // and the libcrypto file it came from.
+    R := DoSync(LClient, 'GET', BASE_URL + '/openssl', '');
+    Check('T6  provider reports the loaded OpenSSL (OpenSslRuntime)',
+      (not R.TimedOut) and (R.StatusCode = 200) and
+      (Pos('OpenSSL ', R.Body) = 1) and (Pos(' from ', R.Body) > 0) and
+      (Pos('libcrypto', LowerCase(R.Body)) > 0),
+      Format('status=%d body=%s', [R.StatusCode, R.Body]));
+    if R.StatusCode = 200 then
+      Writeln('        ', R.Body);
   finally
     LClient.Free;
   end;

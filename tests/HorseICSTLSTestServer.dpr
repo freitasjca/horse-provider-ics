@@ -98,6 +98,14 @@ begin
     begin
       Res.Send('put-ok').Status(THTTPStatus.OK);
     end);
+
+  // [ICS-OSSLRUNTIME-1] What the PROVIDER recorded at Listen, read from a
+  // running server - the client's T6 checks it names an OpenSSL and a path.
+  THorse.Get('/openssl',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      Res.Send(THorseProviderICS.OpenSslRuntime).Status(THTTPStatus.OK);
+    end);
 end;
 
 var
