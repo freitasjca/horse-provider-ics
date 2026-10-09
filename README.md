@@ -24,28 +24,33 @@ The two existing providers cover different niches:
 
 ## Platform scope
 
-- **Delphi only** — Windows (Win32/Win64) **and POSIX (Linux64, macOS)**.
-- **Linux/macOS support rides ICS's own POSIX layer** (`Ics.Posix.WinTypes` + `Ics.Posix.PXMessages`): the cross-platform `TIcsWndControl` message loop is a Win32 message queue on Windows and a POSIX message pump on Linux/macOS. The provider's worker-pool marshal-back (`PostMessage` / `TMessage` / `WM_USER` / `AllocateHWnd`) resolves to the POSIX shim with no code change. TLS uses the same OpenSSL 3.x/4.x libraries (`.so` on Linux).
-- **Not FPC/Lazarus.** ICS's POSIX support is built on the *Delphi* POSIX RTL (`Posix.*`), and ICS compiles out OpenSSL under FPC entirely — a Lazarus/FPC port remains **not viable with stock ICS** (see *Out of scope / follow-ups* and `plans/ics-lazarus-fpc.md`). The FPC seams (`{$IF DEFINED(FPC)}`) are preserved so the build stays cleanly blocked there.
+- **Delphi on Windows** (Win32/Win64), with ICS V9.7 or V9.8.
+- **Not Linux or macOS with ICS V9.x.** ICS V9.7 refuses to compile for POSIX on
+  purpose: `OverbyteIcsTypes.pas` contains `'ICS V9 does nbt build for Posix, use ICS
+  V10'` under `{$IFDEF POSIX}` (ICS history, May 14, 2026: "Don't allow to build for
+  POSIX, not supported"). A Linux64 build stops there with `E2029`. Found by the first
+  real Linux build, 2026-10-09.
+- **Linux needs ICS V10**, which is in beta. V10 replaces ICS's old POSIX layer and the
+  window messages this provider's marshal-back uses, so the provider needs changes
+  before it runs on V10 at all: see `plans/ics-v10-support.md`. MacOS: V10 does not
+  support it yet either.
+- **Not FPC/Lazarus.** ICS compiles out OpenSSL under FPC entirely, so a Lazarus/FPC
+  port is **not viable with stock ICS** (see *Out of scope / follow-ups* and
+  `plans/ics-lazarus-fpc.md`). The FPC seams (`{$IF DEFINED(FPC)}`) are preserved so
+  the build stays cleanly blocked there.
 
-Selecting `HORSE_PROVIDER_ICS` under FPC triggers a compile-time `FATAL` from `Horse.pas`; on Delphi it is accepted on Windows and POSIX targets.
+> **Correction (2026-10-09).** Versions up to v1.0.12 said Delphi POSIX (Linux64,
+> macOS) was supported through ICS's POSIX layer. That was never compiled, and it is
+> not possible with ICS V9.x: see above.
 
-### Linux daemon
+Selecting `HORSE_PROVIDER_ICS` under FPC triggers a compile-time `FATAL` from `Horse.pas`.
 
-For a Linux service binary, use `HORSE_APPTYPE_DAEMON` and the POSIX runner in `Horse.Provider.ICS.Daemon` (it installs SIGTERM/SIGINT handlers, ignores SIGPIPE, and calls the blocking `THorse.Listen`):
+### Windows service
 
-```pascal
-uses Horse, Horse.Provider.ICS.Daemon;
-procedure SetupRoutes;
-begin
-  THorse.Get('/ping', GetPing);
-end;
-begin
-  THorseICSLinuxDaemonApp.Run(SetupRoutes, 9000);
-end.
-```
-
-The same unit exposes a `Vcl.SvcMgr.TService` base class (`THorseICSService`) on Windows — one unit, two shapes, selected by the build target.
+For a Windows service binary, use `HORSE_APPTYPE_DAEMON` and `Horse.Provider.ICS.Daemon`,
+which provides a `Vcl.SvcMgr.TService` base class (`THorseICSService`). The unit also
+contains a POSIX runner (`THorseICSLinuxDaemonApp`, SIGTERM/SIGINT handling) for the
+day the provider runs on ICS V10; with ICS V9.x it cannot be built.
 
 ## Quick start
 
@@ -333,9 +338,9 @@ ICS is not Boss-installable — same situation as mORMot. Add `icsv97/Source` to
 
 ### Runtime files to ship
 
-| File | Windows | Linux / macOS | When |
-|---|---|---|---|
-| OpenSSL | **none with ICS's default settings**: linked into the `.exe` (see below) | `libcrypto.so.N` + `libssl.so.N`, N = the major version ICS was built for (4 by default) | TLS / mTLS only |
+| File | Windows | When |
+|---|---|---|
+| OpenSSL | **none with ICS's default settings**: linked into the `.exe` (see below) | TLS / mTLS only |
 
 Nothing else: the ICS engine compiles into your binary, so a plain-HTTP build ships
 as a single `.exe`.
@@ -363,31 +368,19 @@ To run another OpenSSL, change `OverbyteIcsDefs.inc` and rebuild:
 | Link OpenSSL 3.5 (LTS) instead of 4.0 | `OpenSSL_35` instead of `OpenSSL_40`, and `OpenSSL_Major_3` instead of `OpenSSL_Major_4` |
 | Load DLLs that you ship yourself | undefine `OpenSSL_Resource_Files` and `OpenSSL_ProgramData`; ICS then loads `libcrypto-N-x64.dll` / `libssl-N-x64.dll` from `GSSL_DLL_DIR`, or from the standard DLL search when it is empty (the `.exe` folder first) |
 
-On **Linux / macOS** nothing is linked: ICS loads `libcrypto.so.N` / `libssl.so.N`
-(`.N.dylib` on macOS) through the normal library search, and **does not fall back** to
-another N if that file is missing: `Listen` fails with `libcrypto.so.4 - Handle 0`.
-
-**With ICS V9.7's defaults N is 4, and most Linux systems have only OpenSSL 3**
-(Ubuntu 22.04 and 24.04 ship `libcrypto.so.3` and no OpenSSL 4 package). To use
-OpenSSL 3, change **both** defines in `OverbyteIcsDefs.inc` and rebuild:
-
-- `{$DEFINE OpenSSL_40}` → `{.$DEFINE OpenSSL_40}` and enable `OpenSSL_35` or `OpenSSL_36`;
-- `{$DEFINE OpenSSL_Major_4}` → `{.$DEFINE OpenSSL_Major_4}` and enable `OpenSSL_Major_3`.
-
-Changing only `OpenSSL_Major_*` is not enough: a later block in the same file turns
-`OpenSSL_40` back into `OpenSSL_Major_4` on every platform.
-
-Without rebuilding ICS, set both of these before the first `Listen`:
-```delphi
-GSSL_DLL_DIR          := '/usr/lib/x86_64-linux-gnu/';  // trailing slash required
-GSSLEAY_DLL_IgnoreNew := True;                          // load OpenSSL 3 instead of 4
-```
-`GSSLEAY_DLL_IgnoreNew` on its own silently does nothing: ICS switches to 3 only if
-`GSSL_DLL_DIR + 'libcrypto.so.3'` exists, and with an empty `GSSL_DLL_DIR` that check
-looks in the current directory. Both variables are in `OverbyteIcsTypes`.
-
-ICS V10 (beta at the time of writing) forces OpenSSL 3 on POSIX. Not yet verified on
-Linux with this provider; see *Out of scope / follow-ups*.
+**Linux, for later (ICS V10).** ICS V9.x does not build for Linux (see *Platform
+scope*). Notes for when this provider runs on ICS V10, from source reading:
+- On Linux ICS links nothing: it loads `libcrypto.so.N` / `libssl.so.N` and does not
+  fall back to another N.
+- V10 (beta, SVN r14) forces OpenSSL 3 on POSIX, which matches what Ubuntu 22.04 and
+  24.04 ship. If a later V10 defaults to `OpenSSL_40` again, a block later in
+  `OverbyteIcsDefs.inc` turns it back into `OpenSSL_Major_4` and Linux would ask for
+  `libcrypto.so.4`. Changing `OpenSSL_Major_*` alone does not undo that.
+- To force OpenSSL 3 at run time, set both `GSSL_DLL_DIR` (for example
+  `'/usr/lib/x86_64-linux-gnu/'`, with the trailing slash) and `GSSLEAY_DLL_IgnoreNew :=
+  True` before the first `Listen`. `IgnoreNew` alone does nothing: ICS checks for
+  `GSSL_DLL_DIR + 'libcrypto.so.3'`, which with an empty `GSSL_DLL_DIR` means the
+  current directory.
 
 **Check what you deployed.** `THorseProviderICS.OpenSslRuntime` returns the version and
 the full path of the `libcrypto` that `Listen` loaded, for example
@@ -405,13 +398,8 @@ user's `PATH`.
 
 ## Out of scope / follow-ups
 
-- **Delphi POSIX (Linux64 / macOS)** — **supported** via ICS's own POSIX layer (see *Platform scope*). The message-loop marshaling, multipart decoding, and OpenSSL TLS all carry over with no provider code change; the Linux daemon shape ships in `Horse.Provider.ICS.Daemon`.
+- **Linux64 needs ICS V10** — ICS V9.x refuses to compile for POSIX (see *Platform scope*). The V10 port is planned in `plans/ics-v10-support.md`: new messaging, main-thread delivery, no `MessageLoop` yet, removed POSIX units. MacOS: not supported by V10 either.
 - **FPC / Lazarus** — still **not viable with stock ICS**: ICS's POSIX support rides the *Delphi* POSIX RTL (`Posix.*`, not FPC's `BaseUnix`), and ICS additionally undefines `USE_SSL` under FPC (`icsv97/Source/Include/OverbyteIcsDefs.inc:2429`), so `TSslHttpServer` does not compile and an ICS-on-Lazarus build would be plain-HTTP only — no advantage over the CrossSocket provider, which already runs on Lazarus *with* TLS. The `{$IF DEFINED(FPC)}` FATAL stays; full analysis in `plans/ics-lazarus-fpc.md`.
-- **TLS on Linux is not yet verified with this provider.** By source reading, ICS V9.7's
-  defaults request `libcrypto.so.4`, so on an OpenSSL-3-only system `Listen` fails until
-  ICS is reconfigured (see *Which OpenSSL your server loads*). Run the TLS suite on
-  Linux64 with both the default and the OpenSSL 3 configuration, and record
-  `OpenSslRuntime`.
 - **FMX cross-platform host** (`Ics.Fmx.OverbyteIcsHttpSrv`) — optional later.
 - **Bench server** — functional parity is reached; a throughput bench is the natural next step.
 
