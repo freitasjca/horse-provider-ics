@@ -17,6 +17,8 @@ Routes, on port 9010:
 | `GET /ping` | `pong` |
 | `GET /status` | JSON with the port and the service's process id |
 | `POST /echo` | the request body. It travels through ICS's body handling, the worker pool and the hand-off back to the listener thread's message pump |
+| `GET /diag/raise` | raised from a request hook, so it reaches the provider's error handler: must answer `500 {"error":"Internal Server Error"}` (FIX-ICS-NOCONSOLE; before v1.0.14 a service answered `200` with an empty body) |
+| `GET /diag/provider` | the provider class `THorse` resolved to, e.g. `THorseProviderICSDaemon` |
 
 ## Creating the project in the IDE
 

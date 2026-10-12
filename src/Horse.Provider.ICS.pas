@@ -1407,9 +1407,14 @@ begin
       on E: Exception do
       begin
         // [SEC-31] log internally, send opaque body
-        System.WriteLn(ErrOutput,
-          Format('[HorseICS] Pipeline exception %s: %s',
-            [E.ClassName, E.Message]));
+        // [FIX-ICS-NOCONSOLE] Only a console process has an ErrOutput. In a
+        // VCL or service host (IsConsole = False) this WriteLn raised
+        // EInOutError 105 from INSIDE this handler, so the opaque 500 below
+        // was never set and the client got "I/O error 105".
+        if IsConsole then
+          System.WriteLn(ErrOutput,
+            Format('[HorseICS] Pipeline exception %s: %s',
+              [E.ClassName, E.Message]));
         Ctx.Response.Status(THTTPStatus.InternalServerError);
         Ctx.Response.Send('{"error":"Internal Server Error"}');
         Ctx.Response.ContentType('application/json; charset=utf-8');

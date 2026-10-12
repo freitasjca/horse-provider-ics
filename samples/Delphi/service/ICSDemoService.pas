@@ -67,6 +67,23 @@ begin
   Res.Send(Req.Body);
 end;
 
+// [FIX-ICS-NOCONSOLE probe] GET /diag/raise raises from an onRequest hook, so
+// the exception reaches the provider's pipeline catch (a route-level raise is
+// answered by Horse itself). Expected: 500 {"error":"Internal Server Error"}.
+// Before the fix a service answered "I/O error 105".
+procedure DiagRaiseHook(AReq: THorseRequest; ARes: THorseResponse; ANext: TNextProc);
+begin
+  if SameText(AReq.PathInfo, '/diag/raise') then
+    raise Exception.Create('DIAG-RAISE-DELIBERATE');
+  ANext();
+end;
+
+procedure GetDiagProvider(Req: THorseRequest; Res: THorseResponse);
+begin
+  Res.ContentType('application/json; charset=utf-8')
+     .Send(Format('{"provider":"%s"}', [THorse.ClassParent.ClassName]));
+end;
+
 // --- Service ----------------------------------------------------------------
 
 constructor THorseICSDemoSvc.Create(AOwner: TComponent);
@@ -76,6 +93,8 @@ begin
   THorse.Get('/ping',   GetPing);
   THorse.Get('/status', GetStatus);
   THorse.Post('/echo',  PostEcho);
+  THorse.AddOnRequest(DiagRaiseHook);
+  THorse.Get('/diag/provider', GetDiagProvider);
 end;
 
 end.

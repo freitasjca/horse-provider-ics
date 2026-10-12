@@ -163,9 +163,12 @@ begin
   FOnTaskError :=
     procedure(const E: Exception; ATaskIndex: Int64)
     begin
-      System.WriteLn(ErrOutput,
-        Format('[HorseICSWorkerPool] Task #%d raised %s: %s',
-               [ATaskIndex, E.ClassName, E.Message]));
+      // [FIX-ICS-NOCONSOLE] Only a console process has an ErrOutput; in a
+      // VCL or service host the WriteLn raised EInOutError 105.
+      if IsConsole then
+        System.WriteLn(ErrOutput,
+          Format('[HorseICSWorkerPool] Task #%d raised %s: %s',
+                 [ATaskIndex, E.ClassName, E.Message]));
     end;
 
   for I := 0 to AMinThreads - 1 do
@@ -285,7 +288,15 @@ begin
         except
           on E: Exception do
             if Assigned(FOnTaskError) then
-              FOnTaskError(E, TaskIdx);
+              // [FIX-ICS-NOCONSOLE] The handler runs inside this except; an
+              // exception from it (the old default raised EInOutError 105 in
+              // a GUI or service host) escaped the loop and ENDED this worker
+              // thread, shrinking the pool for good. A log line must not.
+              try
+                FOnTaskError(E, TaskIdx);
+              except
+                // deliberately swallowed - the task's own error was reported
+              end;
         end;
       finally
         Task := nil;
