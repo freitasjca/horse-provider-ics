@@ -371,7 +371,7 @@ ICS is not Boss-installable — same situation as mORMot. Add `icsv97/Source` to
 
 | File | Windows | When |
 |---|---|---|
-| OpenSSL | **none with ICS's default settings**: linked into the `.exe` (see below) | TLS / mTLS only |
+| OpenSSL | **none with ICS's default settings**: embedded in the `.exe` as resources (see below) | TLS / mTLS only |
 
 Nothing else: the ICS engine compiles into your binary, so a plain-HTTP build ships
 as a single `.exe`.
@@ -383,7 +383,7 @@ as a single `.exe`.
 V9.7's defaults on Windows:
 
 - `OpenSSL_Resource_Files` is on, and `OpenSSL_40` with it. The OpenSSL **4.0** DLLs
-  are linked into the `.exe` as resources. On first use ICS extracts them to
+  are embedded in the `.exe` as resources (this is not static linking of OpenSSL). On first use ICS extracts them to
   `C:\ProgramData\ICS-OpenSSL\<version>\` (for example `...\4000\`) and loads them
   from there.
 - **DLLs placed beside the `.exe` are ignored**, and so is `GSSL_DLL_DIR` if your code
