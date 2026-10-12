@@ -52,6 +52,32 @@ which provides a `Vcl.SvcMgr.TService` base class (`THorseICSService`). The unit
 contains a POSIX runner (`THorseICSLinuxDaemonApp`, SIGTERM/SIGINT handling) for the
 day the provider runs on ICS V10; with ICS V9.x it cannot be built.
 
+Since v1.0.13 the base class:
+
+- **runs ICS's message pump** on its listener thread (SVC-PUMP-1). ICS binds every
+  socket to the thread that created it, and in a service `THorse.Listen` returns as
+  soon as the server is up. Before, that thread then ended and took ICS's windows
+  with it (found by reading the code: no service run of the old base is on record).
+  `sc stop` now asks the same thread to run `THorse.StopListen`;
+- **reports a failed `Listen`** (port in use, bad certificate) to the SCM: the error
+  goes to the Application event log and `sc start` fails instead of showing RUNNING;
+- **implements `GetServiceController`** (SVC-CTRL-2), so your service class needs no
+  override of its own. Without one, `sc start` died with error 1067;
+- **has its own `.dfm`** (SVC-DFM-1), so the IDE designs your service as a service.
+
+Your project:
+
+- lists the base in the `.dpr` as
+  `Horse.Provider.ICS.Daemon in '<path>' {HorseICSService: TService}`, before your
+  service unit;
+- starts your service `.dfm` with `inherited`;
+- has both units in the `.dproj` with `<Form>` and `<DesignClass>TService</DesignClass>`;
+- sets `HORSE_PROVIDER_ICS;HORSE_APPTYPE_DAEMON` as project-level defines;
+- is a GUI-subsystem application (the IDE's Service Application default), not
+  `{$APPTYPE CONSOLE}`.
+
+`samples/Delphi/service/` is a complete example.
+
 ## Quick start
 
 ```pascal
@@ -301,6 +327,11 @@ src/
   Horse.Provider.ICS.pas                  — Console-shape provider (default)
   Horse.Provider.ICS.VCL.pas              — VCL host form
   Horse.Provider.ICS.Daemon.pas           — Windows TService
+  Horse.Provider.ICS.Daemon.dfm           — its .dfm (SVC-DFM-1)
+
+samples/Delphi/
+  console/HorseICSConsole.dpr   — minimal console server
+  service/                      — Windows service on THorseICSService
 
 doc/
   architecture-diagrams.md

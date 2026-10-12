@@ -13,10 +13,13 @@ unit Horse.Provider.ICS.Daemon;
 
     {$IFDEF MSWINDOWS}   THorseICSService
                          A Vcl.SvcMgr.TService base class. ServiceStart spawns
-                         a worker thread for THorse.Listen (the SCM has a start
-                         timeout while ICS's message loop blocks), ServiceStop
-                         calls THorse.StopListen which drains in-flight pipelines
-                         via [SEC-30] and unblocks the listener thread.
+                         a listener thread that calls THorse.Listen and then
+                         PUMPS MESSAGES for ICS (SVC-PUMP-1); ServiceStop asks
+                         that thread to run THorse.StopListen itself, then
+                         joins it. Implements GetServiceController
+                         (SVC-CTRL-2) and has its own .dfm (SVC-DFM-1): list
+                         this unit in the app's .dpr as
+                         {HorseICSService: TService}.
 
       type TMyHorseService = class(THorseICSService)
         procedure ServiceCreate(Sender: TObject);  // register routes here
@@ -54,6 +57,7 @@ interface
 uses
 {$IFDEF MSWINDOWS}
   Vcl.SvcMgr,
+  System.SyncObjs,
 {$ENDIF}
 {$IFDEF LINUX}
   Posix.Signal,
@@ -74,18 +78,59 @@ type
 
 {$IFDEF MSWINDOWS}
   { Optional convenience TService base class for Windows-service binaries.
-    Spawns a worker thread for THorse.Listen so the SCM ack is not blocked by
-    ICS's blocking message loop. }
+
+    SVC-PUMP-1: ICS is thread-affine. Every ICS component binds its hidden
+    window to the thread that creates it (OverbyteIcsWndControl.pas,
+    AllocateHWnd: FThreadId := GetCurrentThreadId), and nothing happens on an
+    ICS socket unless that thread pumps messages. In a service IsConsole is
+    False, so THorse.Listen returns as soon as the server is up instead of
+    running ICS's MessageLoop. The listener thread therefore pumps messages
+    itself after Listen returns: it is the thread that owns the listening
+    socket, the clients and the provider's marshal-back receiver. Before
+    SVC-PUMP-1 the thread ended right after Listen, and Windows destroys a
+    thread's windows when the thread exits, so ICS lost the window every
+    socket event is delivered to (found by reading the code; this base had
+    no recorded service run).
+
+    Stop is marshalled onto the same thread (a thread message the pump
+    answers with THorse.StopListen), because ICS objects can only be closed
+    and freed by their owning thread. StopListen drains through [SEC-30] the
+    way the VCL host's FormClose does; the drain waits for the worker pool on
+    the pump thread, so a reply still queued for the pump at that moment is
+    dropped, exactly as on the VCL host.
+
+    A failed Listen (port in use, bad certificate) is reported to the SCM:
+    DoServiceStart waits for Listen's outcome, logs the exception to the
+    Application event log and answers Started := False, so sc start fails
+    instead of reporting RUNNING.
+
+    SVC-CTRL-2: TService.GetServiceController is abstract and TService.Main
+    calls it on the SCM's thread before OnStart, so a descendant without the
+    override died at every start (SCM error 1067) with nothing logged. This
+    class implements it. One service per process - the same limit THorse
+    has, as it hosts one listener per process.
+
+    Build the service as a GUI-subsystem application (the IDE's Service
+    Application default). With APPTYPE CONSOLE, IsConsole is True and Listen
+    runs ICS's own MessageLoop, which does not answer the stop message. }
   THorseICSService = class(TService)
   private
-    FPort:           Integer;
-    FListenerThread: TThread;
+    FPort:             Integer;
+    FListenerThread:   TThread;
+    FListenerThreadId: Cardinal;
+    FQueueReady:       TEvent;   // the listener thread has a message queue
+    FListenDone:       TEvent;   // THorse.Listen returned or raised
+    FListenError:      string;   // set by the listener thread before FListenDone
+    procedure StopListenerThread;
   protected
     procedure DoServiceStart(Sender: TService; var Started: Boolean);
     procedure DoServiceStop(Sender: TService;  var Stopped: Boolean);
   public
     constructor Create(AOwner: TComponent); override;
     destructor  Destroy; override;
+    function GetServiceController: TServiceController; override;
+    { Set this BEFORE the service starts (in the constructor or ServiceCreate,
+      typically) so the listener thread binds the intended port. }
     property Port: Integer read FPort write FPort default 9000;
   end;
 {$ENDIF MSWINDOWS}
@@ -108,29 +153,69 @@ type
 implementation
 
 uses
+{$IFDEF MSWINDOWS}
+  Winapi.Windows,
+  Winapi.Messages,
+{$ENDIF}
   Horse;
 
 {$IFDEF MSWINDOWS}
+
+// SVC-DFM-1: the base class's own .dfm (Horse.Provider.ICS.Daemon.dfm, no
+// DisplayName). The IDE designs a class(THorseICSService) descendant as a
+// SERVICE only when this unit is listed in the .dpr as
+// {HorseICSService: TService} and the descendant's .dfm starts with
+// 'inherited'; otherwise it falls back to the form designer ("Property
+// DisplayName does not exist"). At run time this resource is streamed first.
+{$R *.dfm}
+
+const
+  // SVC-PUMP-1: posted to the listener THREAD (hwnd = 0), so it can never
+  // collide with the WM_USER-based messages ICS posts to its own windows.
+  WM_HORSE_ICS_SERVICE_STOP = WM_APP + $1C5;
+
+  // How long DoServiceStart waits for THorse.Listen. Binding and building the
+  // TLS context take milliseconds; the SCM's own start timeout is 30 s.
+  LISTEN_WAIT_MS = 20000;
+
+var
+  // SVC-CTRL-2: the service this process hosts. Written on the main thread
+  // (Application.CreateForm, before StartServiceCtrlDispatcher), read on the
+  // SCM's control thread afterwards.
+  GActiveService: THorseICSService;
+
+procedure HorseICSServiceController(CtrlCode: DWORD); stdcall;
+begin
+  if GActiveService <> nil then
+    GActiveService.Controller(CtrlCode);
+end;
 
 { THorseICSService }
 
 constructor THorseICSService.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
-  FPort   := 9000;
-  OnStart := DoServiceStart;
-  OnStop  := DoServiceStop;
+  FPort       := 9000;
+  FQueueReady := TEvent.Create(nil, True, False, '');
+  FListenDone := TEvent.Create(nil, True, False, '');
+  OnStart     := DoServiceStart;
+  OnStop      := DoServiceStop;
+  GActiveService := Self;
 end;
 
 destructor THorseICSService.Destroy;
 begin
-  if Assigned(FListenerThread) then
-  begin
-    THorse.StopListen;
-    FListenerThread.WaitFor;
-    FreeAndNil(FListenerThread);
-  end;
+  if GActiveService = Self then
+    GActiveService := nil;
+  StopListenerThread;
+  FreeAndNil(FListenDone);
+  FreeAndNil(FQueueReady);
   inherited;
+end;
+
+function THorseICSService.GetServiceController: TServiceController;
+begin
+  Result := HorseICSServiceController;
 end;
 
 procedure THorseICSService.DoServiceStart(Sender: TService;
@@ -139,24 +224,97 @@ var
   LPort: Integer;
 begin
   LPort := FPort;
-  { Run Listen on a dedicated worker thread so ServiceStart returns promptly to
-    the SCM — ICS's message loop blocks the calling thread until StopListen. }
+  FListenError := '';
+  FListenerThreadId := 0;
+  FQueueReady.ResetEvent;
+  FListenDone.ResetEvent;
+
   FListenerThread := TThread.CreateAnonymousThread(
-    procedure begin THorse.Listen(LPort); end);
+    procedure
+    var
+      LMsg: TMsg;
+    begin
+      // Create this thread's message queue BEFORE announcing the thread id,
+      // so a stop posted at any later moment is queued, never lost.
+      PeekMessage(LMsg, 0, WM_USER, WM_USER, PM_NOREMOVE);
+      FListenerThreadId := GetCurrentThreadId;
+      FQueueReady.SetEvent;
+
+      try
+        // Not a console app, so this returns once the server is up. Every
+        // ICS window it allocates belongs to THIS thread.
+        THorse.Listen(LPort);
+      except
+        on E: Exception do
+        begin
+          FListenError := E.ClassName + ': ' + E.Message;
+          // Tear down whatever Listen built, on the thread that owns it.
+          try
+            THorse.StopListen;
+          except
+            // Startup already failed; the original error is the one to report.
+          end;
+          FListenDone.SetEvent;
+          Exit;
+        end;
+      end;
+      FListenDone.SetEvent;
+
+      // The ICS message pump (SVC-PUMP-1). GetMessage returns False on
+      // WM_QUIT, which ends the loop as ICS's own MessageLoop does.
+      while GetMessage(LMsg, 0, 0, 0) do
+      begin
+        if (LMsg.hwnd = 0) and (LMsg.message = WM_HORSE_ICS_SERVICE_STOP) then
+        begin
+          THorse.StopListen;   // [SEC-30] drain + teardown, on the owning thread
+          Break;
+        end;
+        TranslateMessage(LMsg);
+        DispatchMessage(LMsg);
+      end;
+    end);
   FListenerThread.FreeOnTerminate := False;
   FListenerThread.Start;
+
+  if FListenDone.WaitFor(LISTEN_WAIT_MS) <> wrSignaled then
+  begin
+    // Listen has not come back yet. Leave the thread running; the pump starts
+    // as soon as Listen returns, and a stop is queued until then.
+    LogMessage(Format('Horse ICS: THorse.Listen(%d) did not return within %d ms',
+      [LPort, LISTEN_WAIT_MS]), EVENTLOG_WARNING_TYPE);
+    Started := True;
+    Exit;
+  end;
+
+  if FListenError <> '' then
+  begin
+    LogMessage(Format('Horse ICS: THorse.Listen(%d) failed: %s',
+      [LPort, FListenError]), EVENTLOG_ERROR_TYPE);
+    FListenerThread.WaitFor;
+    FreeAndNil(FListenerThread);
+    Started := False;
+    Exit;
+  end;
+
   Started := True;
+end;
+
+procedure THorseICSService.StopListenerThread;
+begin
+  if not Assigned(FListenerThread) then
+    Exit;
+  // If the thread already ended (Listen failed), PostThreadMessage fails and
+  // WaitFor returns at once.
+  if FQueueReady.WaitFor(LISTEN_WAIT_MS) = wrSignaled then
+    PostThreadMessage(FListenerThreadId, WM_HORSE_ICS_SERVICE_STOP, 0, 0);
+  FListenerThread.WaitFor;
+  FreeAndNil(FListenerThread);
 end;
 
 procedure THorseICSService.DoServiceStop(Sender: TService;
   var Stopped: Boolean);
 begin
-  THorse.StopListen;                   // graceful drain via SEC-30
-  if Assigned(FListenerThread) then
-  begin
-    FListenerThread.WaitFor;           // wait for Listen to actually return
-    FreeAndNil(FListenerThread);
-  end;
+  StopListenerThread;   // the listener thread runs THorse.StopListen
   Stopped := True;
 end;
 
