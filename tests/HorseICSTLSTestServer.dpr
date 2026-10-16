@@ -157,6 +157,21 @@ begin
     // counted, so the provider's InitContext at Listen reuses this load;
     // IcsUnloadSsl below pairs with it. GLIBEAY_DLL_FileName holds the full
     // path once loaded. run-tls-tests.bat echoes the line on every pass.
+    // [ICS-LINUX-OSSL3] Opt-in, for testing the README's run-time workaround on
+    // Linux: with ICS V9.7's defaults ICS requests libcrypto.so.4 and does not
+    // fall back. Setting HORSE_ICS_OPENSSL3_DIR (e.g. /usr/lib/x86_64-linux-gnu/)
+    // makes ICS load OpenSSL 3 from that folder instead. Both variables must be
+    // set before the first load. GSSLEAY_DLL_IgnoreNew alone is a no-op: ICS
+    // only switches if GSSL_DLL_DIR + 'libcrypto.so.3' exists. On Windows the
+    // default ICS defines overwrite GSSL_DLL_DIR, so this changes nothing there.
+    if GetEnvironmentVariable('HORSE_ICS_OPENSSL3_DIR') <> '' then
+    begin
+      GSSL_DLL_DIR := IncludeTrailingPathDelimiter(
+        GetEnvironmentVariable('HORSE_ICS_OPENSSL3_DIR'));
+      GSSLEAY_DLL_IgnoreNew := True;
+      Writeln(Format('[ICSTLSTest] HORSE_ICS_OPENSSL3_DIR: asking ICS for OpenSSL 3 in %s',
+        [GSSL_DLL_DIR]));
+    end;
     IcsLoadSsl;
     Writeln(Format('[ICSTLSTest] certs: %s', [CertDir]));
     Writeln(Format('[ICSTLSTest] OpenSSL: %s from %s',
