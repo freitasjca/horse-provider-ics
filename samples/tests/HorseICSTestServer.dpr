@@ -404,6 +404,15 @@ begin
       Res.ContentType('application/json; charset=utf-8')
          .Send(DecodeReport(Req.ContentFields));
     end);
+
+  // PROVIDER-PROBE-1: the provider class THorse resolved to. A shape whose
+  // project sets no provider define runs on Horse's Indy default.
+  THorse.Get('/diag/provider',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      Res.ContentType('application/json; charset=utf-8')
+         .Send(Format('{"provider":"%s"}', [JE(THorse.ClassParent.ClassName)]));
+    end);
 end;
 
 begin
